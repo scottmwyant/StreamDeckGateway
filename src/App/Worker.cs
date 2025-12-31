@@ -82,11 +82,23 @@ public class Worker(ILogger<Worker> logger) : BackgroundService
             while (!stoppingToken.IsCancellationRequested)
             {
                 stream.ReadTimeout = 5000;
-                byte[] buffer = new byte[1024];
+                byte[] buffer = new byte[512];
                 try
                 {
                     int length = await stream.ReadAsync(buffer, stoppingToken);
-                    logger.LogInformation("Count of bytes read:{n}", length);
+                    //logger.LogInformation("Count of bytes read:{n}", length);
+                    //logger.LogDebug(BitConverter.ToString(buffer));
+
+                    int[] keysDown = HidReport.GetKeysDown(buffer);
+                    if (keysDown.Length == 0)
+                    {
+                        logger.LogTrace("Key up");
+                    }
+                    else
+                    {
+                        logger.LogInformation("Key down {key}", string.Join(" ", keysDown));
+                    }
+
                     await Task.Delay(100, stoppingToken);
                 }
                 catch (TimeoutException)
