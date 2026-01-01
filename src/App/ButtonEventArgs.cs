@@ -1,7 +1,7 @@
 namespace App;
 
-public record ButtonEventArgs
+public class ButtonEventArgs : EventArgs
 {
-    public EventType EventType { get; set; }
+    public ButtonEventType EventType { get; set; }
     public int? Target { get; set; } // 0-14 for button index, null for wake-up
 }

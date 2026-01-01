@@ -54,7 +54,7 @@ internal class ButtonState
         {
             if (Value == 0 && previousState.Value == 0)
             {
-                return new ButtonEventArgs { EventType = EventType.WakeUp, Target = null };
+                return new ButtonEventArgs { EventType = ButtonEventType.WakeUp, Target = null };
             }
             
             // Both states are identical and non-zero - warning case
@@ -70,7 +70,7 @@ internal class ButtonState
         }
 
         // Determine if it's a key down or key up
-        var eventType = ((Value & (1 << buttonIndex)) != 0) ? EventType.KeyDown : EventType.KeyUp;
+        var eventType = ((Value & (1 << buttonIndex)) != 0) ? ButtonEventType.KeyDown : ButtonEventType.KeyUp;
 
         return new ButtonEventArgs { EventType = eventType, Target = buttonIndex + 1 }; // Buttons are 1-indexed
     }

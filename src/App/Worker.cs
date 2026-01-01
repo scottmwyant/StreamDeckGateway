@@ -8,6 +8,8 @@ public class Worker(ILogger<Worker> logger) : BackgroundService
     private const int StreamDeckPid = 0x0080;
     private const int MonitoringIntervalMs = 5000;
 
+    public event Func<ButtonEventArgs, Task>? ButtonEventAsync;
+
     private ButtonState _state = new ();
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -92,13 +94,41 @@ public class Worker(ILogger<Worker> logger) : BackgroundService
                     ButtonEventArgs? e = newState.CompareWith(_state);
                     if (e != null)
                     {
-                        if (e.EventType == EventType.KeyUp)
+                        if (e.EventType == ButtonEventType.KeyUp)
                         {
                             logger.LogTrace("Button Event: {eventType} {target}", e.EventType, e.Target?.ToString() ?? "N/A");
                         }
                         else
                         {
                             logger.LogInformation("Button Event: {eventType} {target}", e.EventType, e.Target?.ToString() ?? "N/A");
+                        }
+
+                        var invocation = ButtonEventAsync;
+                        if (invocation != null)
+                        {
+                            var delegates = invocation.GetInvocationList();
+                            var tasks = new List<Task>(delegates.Length);
+                            foreach (var d in delegates)
+                            {
+                                var func = (Func<ButtonEventArgs, Task>)d;
+                                try
+                                {
+                                    tasks.Add(func(e));
+                                }
+                                catch (Exception ex)
+                                {
+                                    logger.LogError(ex, "Exception invoking async button handler");
+                                }
+                            }
+
+                            try
+                            {
+                                await Task.WhenAll(tasks);
+                            }
+                            catch (Exception ex)
+                            {
+                                logger.LogError(ex, "One or more async button handlers failed");
+                            }
                         }
                     }
                     _state = newState;

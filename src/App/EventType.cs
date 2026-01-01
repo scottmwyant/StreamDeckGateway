@@ -1,6 +1,6 @@
 namespace App;
 
-public enum EventType
+public enum ButtonEventType
 {
     KeyDown,
     KeyUp,
