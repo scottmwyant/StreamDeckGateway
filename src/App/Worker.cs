@@ -8,6 +8,8 @@ public class Worker(ILogger<Worker> logger) : BackgroundService
     private const int StreamDeckPid = 0x0080;
     private const int MonitoringIntervalMs = 5000;
 
+    private ButtonState _state = new ();
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         logger.LogInformation("StreamDeck service starting...");
@@ -86,24 +88,25 @@ public class Worker(ILogger<Worker> logger) : BackgroundService
                 try
                 {
                     int length = await stream.ReadAsync(buffer, stoppingToken);
-                    //logger.LogInformation("Count of bytes read:{n}", length);
-                    //logger.LogDebug(BitConverter.ToString(buffer));
-
-                    int[] keysDown = HidReport.GetKeysDown(buffer);
-                    if (keysDown.Length == 0)
+                    var newState = new ButtonState(buffer);
+                    ButtonEventArgs? e = newState.CompareWith(_state);
+                    if (e != null)
                     {
-                        logger.LogTrace("Key up");
+                        if (e.EventType == EventType.KeyUp)
+                        {
+                            logger.LogTrace("Button Event: {eventType} {target}", e.EventType, e.Target?.ToString() ?? "N/A");
+                        }
+                        else
+                        {
+                            logger.LogInformation("Button Event: {eventType} {target}", e.EventType, e.Target?.ToString() ?? "N/A");
+                        }
                     }
-                    else
-                    {
-                        logger.LogInformation("Key down {key}", string.Join(" ", keysDown));
-                    }
-
+                    _state = newState;
                     await Task.Delay(100, stoppingToken);
                 }
                 catch (TimeoutException)
                 {
-                    logger.LogDebug("Read operation timed out.");
+                    logger.LogTrace("Read operation timed out.");
                 }
             }
         }
