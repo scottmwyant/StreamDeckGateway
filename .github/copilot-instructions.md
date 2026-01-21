@@ -24,7 +24,7 @@ There is only 1 input reporty, it's always going to be 512-bytes long and the fi
 
 - 0x00: UINT8, Report ID (0x01)
 - 0x01: UINT8, Command
-- 0x02 and 0x03: UINT16 payload length (little-endian)
+- 0x02 and 0x03: UINT16 payload length in bytes
 
 The message payload starts at 0x04 and is the remainder of the message.  Given the assumptions about the device we're using, we can focus on byets 0x04 through 0x12 (15 bytes), which reflect button state.
 
