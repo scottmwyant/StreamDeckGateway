@@ -26,7 +26,7 @@ There is only 1 input reporty, it's always going to be 512-bytes long and the fi
 - 0x01: UINT8, Command
 - 0x02 and 0x03: UINT16 payload length (little-endian)
 
-  The message payload starts at 0x04 and is the remainder of the message.  Given the assumptions about the device we're using, we can focus on byets 0x04 through 0x12 (15 bytes), which reflect button state.
+The message payload starts at 0x04 and is the remainder of the message.  Given the assumptions about the device we're using, we can focus on byets 0x04 through 0x12 (15 bytes), which reflect button state.
 
 The device sends an output report when at least 1 button changes state KeyDown or KeyUp. The value of these 15 bytes corresponds to state of the button; value of 0x00 indicates the button is UP, value of 0x01 indicates the button is DOWN.
 
