@@ -82,16 +82,20 @@ class InputReportBuffer():
         self._size = 20
 
     def add(self, report: InputReport) -> None:
-        if len(self._buffer) >= self._max:
+        if len(self._buffer) >= self._size:
             self._buffer.pop(0)
         self._buffer.append(report)
 
     @property
     def size(self) -> int:
-        return len(self._size)
+        return self._size
     
     def __len__(self) -> int:
         return len(self._buffer)
+    
+    def __getitem__(self, index: int) -> InputReport:
+        """Access reports by index: 0 is oldest, -1 is newest."""
+        return self._buffer[index]
 
 class Streamdeck:
 
@@ -186,9 +190,11 @@ class Streamdeck:
         for i in range(BUTTON_COUNT):
             btnProfile = self._getConfiguredProfile(i)
             if rpt.hasButtonChanged(i):
+                
                 if btnProfile == "default":
                     if rpt.isButtonDown(i):
                         self._fire(i)
+                
                 elif btnProfile == "double-action":
                     if not rpt.isButtonDown(i):
                         # Search the buffer for the most recent KeyUp event on this button
@@ -205,14 +211,15 @@ class Streamdeck:
                     pass
 
 
-                is_down = rpt.isButtonDown(i)
-                last_ts = self._lastEvent[i]
-                duration_ms: Optional[int]
-                if last_ts > 0:
-                    duration_ms = rpt.timestamp - last_ts
-                else:
-                    duration_ms = None
+                
 
+
+                # The _fire method is where we wire in action,
+                # That could mean toggle internal state for switches then send a message over the network.
+                # Will be interesting to see how that works out; do we pass in an action?
+                
+
+                
                 # record the change with timing info, then update timestamp
                 # toggle ON/OFF on key-up when duration < 1000ms
                 if not is_down and duration_ms is not None and duration_ms < 1000:
@@ -250,10 +257,10 @@ class Streamdeck:
         print(result)
         return result
 
-    def _getConfiguredProfile(index: int) -> str:
+    def _getConfiguredProfile(self, index: int) -> str:
         """Stub: get the configured profile for the given button index.
         """
-        return "double-action" if index == BUTTON_COUNT -1 else "default"
+        return "double-action" if index == BUTTON_COUNT - 1 else "default"
     
     def _fire(self, index: int, modifier: Optional[str] = None) -> None:
         """Stub: fire the action for the given button index.
