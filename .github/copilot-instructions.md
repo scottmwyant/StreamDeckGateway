@@ -40,3 +40,6 @@ For now we assume when the device is powered on, all buttons are UP, that behavi
 
 - The `paho-mqtt` library will be used to handle MQTT communication.
 
+## Code Style Guidelines
+
+- Prefer "camelCase" over "snake_case" for variable and method names
