@@ -184,12 +184,16 @@ class Streamdeck:
 
         changedButtons: List[Dict[str, Optional[int]]] = []
 
-        # Iterate over the report payload (each button), compare to previous reports.
+        # Iterate over the report payload (each button)
+        # Get the profile for the button and call the appropriate handler.
+        # 
+        # 
+        # , compare to previous reports.
         # May require cyclying back through multiple reports to find the last event
         # for the given button.
         for i in range(BUTTON_COUNT):
-            btnProfile = self._getConfiguredProfile(i)
             if rpt.hasButtonChanged(i):
+                btnProfile = self._getConfiguredProfile(i)
                 
                 if btnProfile == "default":
                     if rpt.isButtonDown(i):
@@ -217,43 +221,20 @@ class Streamdeck:
                 # The _fire method is where we wire in action,
                 # That could mean toggle internal state for switches then send a message over the network.
                 # Will be interesting to see how that works out; do we pass in an action?
-                
-
-                
-                # record the change with timing info, then update timestamp
-                # toggle ON/OFF on key-up when duration < 1000ms
-                if not is_down and duration_ms is not None and duration_ms < 1000:
-                    # toggle bit
-                    self._on ^= (1 << i)
-
-                on_state = bool((self._on >> i) & 1)
-                obj = {
-                    "index": i,
-                    "position": 1 if is_down else 0,
-                    # "last_ts": last_ts,
-                    "switch": 1 if on_state else 0,
-                }
-                if duration_ms is not None:
-                    obj["duration_ms"] = duration_ms
-                changedButtons.append(obj)
-
-                # update last event timestamp to now
-                self._lastEvent[i] = rpt.timestamp
 
 
         # Summarize results
         result = {
             "timestamp": rpt.timestamp,
             "eventType": rpt.eventType,
-            "value_new": rpt.value,
-            "changedMask": rpt.changedMask,
-            "changedCount": rpt.changedCount,
-            "changedButtons": changedButtons,
+            "value": rpt.value,
+            "change": {
+                "mask": rpt.changedMask,
+                "count": rpt.changedCount,
+                "detail": changedButtons,
+            }
         }
-
-        # update internal state
-        self._lastReport = rpt
-
+        self._buffer.add(rpt)
         print(result)
         return result
 
