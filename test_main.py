@@ -2,7 +2,7 @@
 
 import unittest
 import time
-from main import InputReport, InputReportBuffer, Streamdeck, BUTTON_COUNT
+from main import InputReport, Streamdeck, BUTTON_COUNT
 
 
 class TestInputReport(unittest.TestCase):
@@ -92,42 +92,6 @@ class TestInputReport(unittest.TestCase):
         self.assertTrue(ir.hasButtonChanged(5))
         self.assertFalse(ir.hasButtonChanged(6))
 
-class TestInputReportBuffer(unittest.TestCase):
-    """Test suite for InputReportBuffer class."""
-    
-    def _create_report(self, button_states: dict = None) -> InputReport:
-        """Helper to create an InputReport with optional button states."""
-        header = [0x01, 0x00, 0x0f, 0x00]
-        payload = [0x00] * 15
-        if button_states:
-            for idx, state in button_states.items():
-                payload[idx] = 0x01 if state else 0x00
-        payload.extend([0x00] * 493)
-        report = bytes(header + payload)
-        return InputReport(report)
-    
-    def test_init(self):
-        """Test buffer initialization."""
-        buf = InputReportBuffer()
-        self.assertEqual(len(buf), 0)
-    
-    def test_add_single_report(self):
-        """Test adding a single report."""
-        buf = InputReportBuffer()
-        report = self._create_report()
-        buf.add(report)
-        self.assertEqual(len(buf), 1)
-    
-    def test_buffer_max_size(self):
-        """Test that buffer respects maximum size."""
-        buf = InputReportBuffer()
-        
-        # Add more than max reports
-        for _ in range(25):
-            report = self._create_report()
-            buf.add(report)
-        self.assertEqual(len(buf), 20)  # Should maintain max size
-
 class TestStreamdeck(unittest.TestCase):
     """Test suite for Streamdeck class."""
     
@@ -151,7 +115,7 @@ class TestStreamdeck(unittest.TestCase):
         """Test event type determination when no buttons change."""
         sd = Streamdeck()
         report = self._createReport()
-        eventType = sd.determineEventType(report)
+        eventType = sd._determineEventType(report)
         self.assertEqual(eventType, 3)  # WakeUp
     
     def test_determine_event_type_key_down(self):
@@ -161,7 +125,7 @@ class TestStreamdeck(unittest.TestCase):
         # Set changedMask to indicate button 0 changed
         report.changedMask = 0b1
         report.changedCount = 1
-        event_type = sd.determineEventType(report)
+        event_type = sd._determineEventType(report)
         self.assertEqual(event_type, 1)  # KeyDown
     
     def test_determine_event_type_key_up(self):
@@ -171,37 +135,14 @@ class TestStreamdeck(unittest.TestCase):
         report1 = self._createReport({0: True})
         report1.changedMask = 0b1
         report1.changedCount = 1
-        sd._buffer.add(report1)
+        sd._buffer.append(report1)
         
         # Then release it
         report2 = self._createReport({0: False})
         report2.changedMask = 0b1
         report2.changedCount = 1
-        event_type = sd.determineEventType(report2)
+        event_type = sd._determineEventType(report2)
         self.assertEqual(event_type, 0)  # KeyUp
-    
-    def test_handle_hid_input_report_with_bytes(self):
-        """Test handling HID report from raw bytes."""
-        sd = Streamdeck()
-        header = [0x01, 0x00, 0x0f, 0x00]
-        payload = [0x01] + [0x00] * 14  # Button 0 pressed
-        payload.extend([0x00] * 493)
-        report = bytes(header + payload)
-        result = sd.handle_hid_input_report(report)
-        self.assertEqual(result["change"]["count"], 1)
-        self.assertIn(result["eventType"], [0, 1, 2, 3, 4])
-    
-    def test_handle_hid_input_report_with_input_report(self):
-        """Test handling HID report from InputReport instance."""
-        sd = Streamdeck()
-        header = [0x01, 0x00, 0x0f, 0x00]
-        payload = [0x01] + [0x00] * 14  # Button 0 pressed
-        payload.extend([0x00] * 493)
-        report = InputReport(bytes(header + payload))
-        
-        result = sd.handle_hid_input_report(report)
-        
-        self.assertEqual(result["change"]["count"], 1)
     
     def test_handle_hid_input_report_invalid_type(self):
         """Test that invalid report type raises TypeError."""

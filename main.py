@@ -7,9 +7,19 @@ reports (512 bytes, 15-byte payload starting at offsets 0x04) where each
 payload byte is 0x00 for UP and 0x01 for DOWN.
 """
 import time
-from typing import List, Dict, Optional
+import json
+from typing import List, Dict, Optional, Tuple
+from enum import Enum
+# import paho.mqtt.client as mqtt
 
 BUTTON_COUNT = 15
+
+class EventType(Enum):
+    KEY_UP = 0
+    KEY_DOWN = 1
+    KEY_UP_DOWN = 2
+    WAKE_UP = 3
+    NO_CHANGE = 4
 
 class InputReport():
     """Represents a parsed HID input report.
@@ -72,47 +82,24 @@ class InputReport():
         
         return bool((self.value >> index) & 1)
 
-class InputReportBuffer():
-    """
-    Accumulates a collection of input reports so we can understand discrete state changes.
-    Index 0 is the oldest report, index -1 is the most recent.
-    """
-    def __init__(self) -> None:
-        self._buffer: List[InputReport] = []
-        self._size = 20
-
-    def add(self, report: InputReport) -> None:
-        if len(self._buffer) >= self._size:
-            self._buffer.pop(0)
-        self._buffer.append(report)
-
-    @property
-    def size(self) -> int:
-        return self._size
-    
-    def __len__(self) -> int:
-        return len(self._buffer)
-    
-    def __getitem__(self, index: int) -> InputReport:
-        """Access reports by index: 0 is oldest, -1 is newest."""
-        return self._buffer[index]
-
 class Streamdeck:
 
-    def _seedInputReport(self) -> InputReport:
+    def __init__(self) -> None:
+        # Initialize with a report indicating all buttons up
         header = [0x01, 0x00, 0x0f, 0x00]
         payload = [0x00] * 508
-        return InputReport(bytearray(header + payload))
-
-    def __init__(self) -> None:
-        self._buffer = InputReportBuffer()
-        # seed the buffer with an "all buttons up" report
-        seedReport = self._seedInputReport()
-        self._buffer.add(seedReport)
-        # start with all buttons released
+        self._buffer = [InputReport(bytes(header + payload))]
         self._value = 0
+        # Initialize a logical model, all switches off
+        self._model = []
+        for i in range(BUTTON_COUNT):
+            self._model.append({
+                "state": 0 , # state of the switch 0=off, 1=on, 2=long-on
+                "timestamp": 0, # timestamp of last hardware event
+                "position": 0 # position of last hardware event
+            })
 
-    def determineEventType(self, report: InputReport) -> int:
+    def _determineEventType(self, report: InputReport) -> int:
         """
         Compare the current report to the previous report to
         characterize the type of event.  Returns one of the following
@@ -122,7 +109,7 @@ class Streamdeck:
 
         # Compare to last report in buffer to determine event type
         if self._buffer[-1].value == report.value:
-                return 3 if report.value == 0 else 4
+                return EventType.WAKE_UP.value if report.value == 0 else EventType.NO_CHANGE.value
 
         isUp = False
         isDown = False
@@ -135,17 +122,133 @@ class Streamdeck:
                     isUp = True
         
         if isUp and not isDown:
-            return 0  # KeyUp
+            return EventType.KEY_UP.value
         
         if isDown and not isUp:
-            return 1  # KeyDown
+            return EventType.KEY_DOWN.value
         
         if isUp and isDown:
-            return 2  # KeyUpDown
+            return EventType.KEY_UP_DOWN.value
     
         return None
     
     def handle_hid_input_report(self, report) -> Dict:
+        hwEvent = self._computeChanges(report)
+        eventData = None
+        if hwEvent["changeCount"] > 0:
+            eventData = self._updateModel(hwEvent)
+
+        # Construct a payload that contains
+        #  - Manufacturer
+        #  - Model
+        #  - Serial number
+        #  - Firmware version
+        #  - Button states
+        if eventData is not None:
+            print(eventData)
+            res = self._sendEventData(eventData)
+            self._showResult(res)
+
+    def _sendEventData(self, payload: Dict) -> Tuple[int, str]:
+        """Stub for sending event data to another system.
+        """
+        return 200, "OK"
+    
+    def _sendEventData_MQTT(self, payload: Dict) -> Tuple[int, str]:
+        """Send the event data to MQTT broker.
+        
+        Connects to the MQTT broker, publishes the event, and disconnects.
+        Since events are infrequent, a new connection is created per event.
+        
+        Args:
+            payload: Dictionary containing event data to publish
+            
+        Returns:
+            Tuple of (status_code, message)
+        """
+        try:
+            # MQTT configuration
+            broker = "localhost"
+            port = 1883
+            topic = "streamdeck/events"
+            
+            # Create MQTT client and set up callbacks
+            client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1)
+            
+            def on_connect(client, userdata, flags, rc):
+                if rc != 0:
+                    raise mqtt.MQTTException(f"Connection failed with code {rc}")
+            
+            def on_publish(client, userdata, mid):
+                pass
+            
+            def on_disconnect(client, userdata, rc):
+                pass
+            
+            client.on_connect = on_connect
+            client.on_publish = on_publish
+            client.on_disconnect = on_disconnect
+            
+            # Connect to broker
+            client.connect(broker, port, keepalive=5)
+            
+            # Publish the event data as JSON
+            message = json.dumps(payload)
+            result = client.publish(topic, message, qos=1)
+            
+            # Wait for publish to complete
+            client.loop(timeout=1.0)
+            
+            # Disconnect
+            client.disconnect()
+            
+            if result.rc == mqtt.MQTT_ERR_SUCCESS:
+                return 200, "Event published successfully"
+            else:
+                return 400, f"Failed to publish: {mqtt.error_string(result.rc)}"
+                
+        except Exception as e:
+            return 500, f"MQTT error: {str(e)}"
+
+    def _showResult(self, res: str) -> None:
+        """Stub: show the result of sending event data.
+        """
+        print(f"Result: {res}")
+
+    def _updateModel(self, hwEvent: Dict) -> Dict:
+        """Update the internal model based on the changes detected
+        in the input report.  Returns event data for further processing.
+        """
+
+        # This is where we translate hardware events to logical events
+        # Button profile should be considered, e.g. momentary vs toggle vs double-toggle
+        # Consider a long-press could communicate higher urgency.
+
+        # The question is where do we set the threshold for long press?
+        # Do we send the duration out to the higher level system?
+        # Seems config file would be apporpriate, so different systems do not
+        # have the opportunity to disagree on what a long-press is.
+        # Keeping the logic local also enables immidiate feedback.
+        #
+        # Next question is what semantics do we send?
+        # Maybe send an array of integer values (0,1,2).
+
+        stateChange = False
+        for btn in hwEvent["detail"]:
+            index = btn["index"]
+            position = btn["position"]
+            duration_ms = btn.get("duration_ms") 
+            self._model[index]["timestamp"] = hwEvent["timestamp"]
+            self._model[index]["position"] = position
+
+            if position == 0:
+                stateChange = True
+                level = 1 if duration_ms < 1000 else 2
+                self._model[index]["state"] = level if self._model[index]["state"] == 0 else 0
+                self._repaintButton(index, self._model[index]["state"])
+        return [x["state"] for x in self._model] if stateChange else None
+
+    def _computeChanges(self, report) -> Dict:
         # Accept either raw bytes or an InputReport instance
         if isinstance(report, InputReport):
             rpt = report
@@ -160,7 +263,7 @@ class Streamdeck:
 
         rpt.changedMask = self._buffer[-1].value ^ rpt.value
         rpt.changedCount = rpt.changedMask.bit_count()
-        rpt.eventType = self.determineEventType(rpt)
+        rpt.eventType = self._determineEventType(rpt)
 
         # What's thhe logic for a "switch" or for a "long-press"?
         
@@ -193,34 +296,36 @@ class Streamdeck:
         # for the given button.
         for i in range(BUTTON_COUNT):
             if rpt.hasButtonChanged(i):
-                btnProfile = self._getConfiguredProfile(i)
-                
-                if btnProfile == "default":
-                    if rpt.isButtonDown(i):
-                        self._fire(i)
-                
-                elif btnProfile == "double-action":
-                    if not rpt.isButtonDown(i):
-                        # Search the buffer for the most recent KeyUp event on this button
-                        for x in range(len(self._buffer)):
-                            e = self._buffer[-1 - x]
-                            if e.isButtonDown(i):
-                                    duration_ms = rpt.timestamp - e.timestamp
-                                    if duration_ms < 1000:
-                                        self._fire(i)
-                                    else:
-                                        self._fire(i, "long-press")
-                                    break
-                else:
-                    pass
+                obj = {"index": i, "position": int(rpt.isButtonDown(i))}                
+                if not rpt.isButtonDown(i):
+                    # Search the buffer for the most recent KeyDown event on this button
+                    # to calculate duration.  If not found, duration is 0.
+                    # Could also consider a secondary data structure, keeping the details
+                    # for each most recent button event in a dictionary.  This assumes
+                    # button state always toggles, the only exception should be wakeup.
+                    ms = 0
+                    for x in range(len(self._buffer)):
+                        e = self._buffer[-1 - x]
+                        if e.isButtonDown(i):
+                                ms = rpt.timestamp - e.timestamp
+                    obj["duration_ms"] = ms
 
 
-                
+                    # Get the timestamp for the inverse state from the model...
+                    # Want to assume that the last event is always the opposite state
+                    # but that's not really safe.  When you wake up the device, the
+                    # timestamp of the KeyDown will be missed, so you'll get a KeyUp
+                    # without a prior KeyDown.
+                    #
+                    # That said, we should never be hitting this code path on
+                    # a wake up because we're assuming a wake up will look like
+                    # no buttons have changed state.
+                    ms =0
+                    if self._model[i]["timestamp"] > 0 and (self._model[i]["position"] != obj["position"]) :
+                        ms = rpt.timestamp - self._model[i]["timestamp"]
+                    obj["duration_ms"] = ms
 
-
-                # The _fire method is where we wire in action,
-                # That could mean toggle internal state for switches then send a message over the network.
-                # Will be interesting to see how that works out; do we pass in an action?
+                changedButtons.append(obj)
 
 
         # Summarize results
@@ -228,30 +333,18 @@ class Streamdeck:
             "timestamp": rpt.timestamp,
             "eventType": rpt.eventType,
             "value": rpt.value,
-            "change": {
-                "mask": rpt.changedMask,
-                "count": rpt.changedCount,
-                "detail": changedButtons,
-            }
+            "changeMask": rpt.changedMask,
+            "changeCount": rpt.changedCount,
+            "detail": changedButtons,
         }
-        self._buffer.add(rpt)
+        self._buffer.append(rpt)
         print(result)
         return result
 
-    def _getConfiguredProfile(self, index: int) -> str:
-        """Stub: get the configured profile for the given button index.
+    def _repaintButton(self, index: int, state: int) -> None:
+        """Stub: repaint the button at the given index to reflect the given state.
         """
-        return "double-action" if index == BUTTON_COUNT - 1 else "default"
-    
-    def _fire(self, index: int, modifier: Optional[str] = None) -> None:
-        """Stub: fire the action for the given button index.
-        """
-        if modifier is None:
-            print(f"Firing action for button {index}")
-        elif modifier == "long-press":
-            print(f"Firing action for button {index} with modifier {modifier}")
-        else:
-            raise ValueError(f"unknown action modifier: {modifier}")
+        pass
 
 def run():
     sd = Streamdeck()
@@ -264,6 +357,7 @@ def run():
     # Simulate: button 0 pressed
     report[4] = 0x01
     rpt = InputReport(bytes(report))
+    sd.handle_hid_input_report(rpt)
 
     time.sleep(1.5)
     # Simulate: button 0 released, button 3 pressed
