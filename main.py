@@ -9,10 +9,17 @@ payload byte is 0x00 for UP and 0x01 for DOWN.
 import time
 import json
 from typing import List, Dict, Optional, Tuple
+from dataclasses import dataclass
 from enum import Enum
 # import paho.mqtt.client as mqtt
 
 BUTTON_COUNT = 15
+
+@dataclass
+class Button:
+    state: int = 0
+    timestamp: int = 0
+    position: int = 0
 
 class EventType(Enum):
     KEY_UP = 0
@@ -21,65 +28,68 @@ class EventType(Enum):
     WAKE_UP = 3
     NO_CHANGE = 4
 
-class InputReport():
-    """Represents a parsed HID input report.
-    """
+@dataclass
+class InputReport:
+    """Represents a parsed HID input report."""
+    
+    reportId: int
+    command: int
+    length: int
+    value: int
+    timestamp: int = field(default_factory=lambda: int(time.time() * 1000))
+    countKeysDown: int = field(init=False)
+    countKeysUp: int = field(init=False)
+    
+    # Attributes to be set externally after comparison to previous report
+    changedMask: int | None = None
+    changedCount: int | None = None
+    eventType: int | None = None
 
-    def __init__(self, report: bytes) -> None:
-
-        if not isinstance(report, (bytes, bytearray)):
-            raise TypeError("report must be bytes or bytearray")
-
-        if len(report) != 512:
-            raise ValueError("report must be exactly 512 bytes")
-        
-        # filled in later, need to compare to previous report
-        self.changedMask: int = None
-        self.changedCount: int = 0
-        self.eventType: int = None
-        # timestamp in unix ms
-        self.timestamp = int(time.time() * 1000)
-        # header fields
-        self.report_id = report[0]
-        self.command = report[1]
-        self.length = int.from_bytes(report[2:4], "little")
-        # there should be exactly 1 byte in the payload per button
-        if self.length != BUTTON_COUNT:
-            raise ValueError(f"unexpected payload length: {self.length}")
-        # extract the payload
-        self.payload = report[4:4 + self.length]
-        
-        # Iterate over payload bytes to build a bit-packed
-        # int value where LSB is button 0, MSB is button 14.
-        self.value = 0
-        for i in range(len(self.payload)):
-            # coerce the byte to a bit 0x00 or 0x01
-            bit = int(bool(self.payload[i]))
-            # drop the bit into the correct position
-            self.value |= (bit << i)
-        
-        #  number of buttons down == number of bits that are high
+    def __post_init__(self):
         self.countKeysDown = self.value.bit_count()
         self.countKeysUp = BUTTON_COUNT - self.countKeysDown
 
+    @classmethod
+    def from_bytes(cls, report: bytes) -> "InputReport":
+        """Parse a 512-byte HID report into an InputReport instance."""
+        
+        if len(report) != 512:
+            raise ValueError("report must be exactly 512 bytes")
+
+        report_id = report[0]
+        command = report[1]
+        length = int.from_bytes(report[2:4], "little")
+
+        if length != BUTTON_COUNT:
+            raise ValueError(f"unexpected payload length: {length}")
+
+        payload = report[4:4 + length]
+
+        # Build bit-packed integer where LSB = button 0
+        value = 0
+        for i, b in enumerate(payload):
+            bit = int(bool(b))
+            value |= bit << i
+
+        return cls(
+            reportId=reportId,
+            command=command,
+            length=length,
+            value=value
+        )
+
     def hasButtonChanged(self, index: int) -> bool:
-        """Has the button at the given index has changed state
-        since the previous report.
-        """
+        """Check if a button has changed state since the previous report."""
         if self.changedMask is None:
             raise ValueError("changedMask is not set")
-        
-        if index < 0 or index >= BUTTON_COUNT:
+        if not 0 <= index < BUTTON_COUNT:
             raise ValueError(f"index must be in range 0..{BUTTON_COUNT-1}")
-        
         return bool((self.changedMask >> index) & 1)
 
     def isButtonDown(self, index: int) -> bool:
-        """Is the button at the given index currently down.
-        """
-        if index < 0 or index >= BUTTON_COUNT:
+        """Check if a button is currently down."""
+        if not 0 <= index < BUTTON_COUNT:
             raise ValueError(f"index must be in range 0..{BUTTON_COUNT-1}")
-        
         return bool((self.value >> index) & 1)
 
 class Streamdeck:
@@ -91,13 +101,7 @@ class Streamdeck:
         self._buffer = [InputReport(bytes(header + payload))]
         self._value = 0
         # Initialize a logical model, all switches off
-        self._model = []
-        for i in range(BUTTON_COUNT):
-            self._model.append({
-                "state": 0 , # state of the switch 0=off, 1=on, 2=long-on
-                "timestamp": 0, # timestamp of last hardware event
-                "position": 0 # position of last hardware event
-            })
+        self._model = [Button() for _ in range(BUTTON_COUNT)]
 
     def _determineEventType(self, report: InputReport) -> int:
         """
