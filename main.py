@@ -1,17 +1,12 @@
 #!/usr/bin/env python3
-"""StreamDeck state model and HID input report handling.
-
-This module models the StreamDeck button state using a 16-bit unsigned
-integer (bits 0..14 correspond to buttons 0..14). It parses HID input
-reports (512 bytes, 15-byte payload starting at offsets 0x04) where each
-payload byte is 0x00 for UP and 0x01 for DOWN.
-"""
 import time
 import json
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
 from enum import Enum
+
 # import paho.mqtt.client as mqtt
+# import pyhidapi.hid
 
 BUTTON_COUNT = 15
 
@@ -28,63 +23,46 @@ class EventType(Enum):
     WAKE_UP = 3
     NO_CHANGE = 4
 
-@dataclass
+
 class InputReport:
     """Represents a parsed HID input report."""
-    
-    reportId: int
-    command: int
-    length: int
-    value: int
-    timestamp: int = field(default_factory=lambda: int(time.time() * 1000))
-    countKeysDown: int = field(init=False)
-    countKeysUp: int = field(init=False)
-    
-    # Attributes to be set externally after comparison to previous report
-    changedMask: int | None = None
-    changedCount: int | None = None
-    eventType: int | None = None
 
-    def __post_init__(self):
-        self.countKeysDown = self.value.bit_count()
-        self.countKeysUp = BUTTON_COUNT - self.countKeysDown
-
-    @classmethod
-    def from_bytes(cls, report: bytes) -> "InputReport":
+    def __init__(self, report: bytes = None):
         """Parse a 512-byte HID report into an InputReport instance."""
+        self.timestamp = int(time.time() * 1000)
         
-        if len(report) != 512:
+        if report is None:
+            report = bytes([0x01, 0x00, 0x0f, 0x00] + ([0x00] * 508))
+            
+        if not (isinstance(report, (bytes, bytearray)) and len(report) == 512):
             raise ValueError("report must be exactly 512 bytes")
-
-        report_id = report[0]
-        command = report[1]
+        
+        self.id = report[0]
+        self.command = report[1]
         length = int.from_bytes(report[2:4], "little")
-
         if length != BUTTON_COUNT:
             raise ValueError(f"unexpected payload length: {length}")
-
-        payload = report[4:4 + length]
-
+        self._report = report[0:4+length]
         # Build bit-packed integer where LSB = button 0
-        value = 0
-        for i, b in enumerate(payload):
-            bit = int(bool(b))
-            value |= bit << i
+        payload = report[4:4 + length]
+        self.value = 0
+        for i, byteValue in enumerate(payload):
+            self.value |= int(bool(byteValue)) << i
+        self.countDown = self.value.bit_count()
+        self.countUp = length - self.countDown
 
-        return cls(
-            reportId=reportId,
-            command=command,
-            length=length,
-            value=value
-        )
+        # Attributes to be set externally after comparison to previous report
+        self.changeMask: int | None = None
+        self.changeCount: int | None = None
+        self.eventType: int | None = None
 
     def hasButtonChanged(self, index: int) -> bool:
         """Check if a button has changed state since the previous report."""
-        if self.changedMask is None:
-            raise ValueError("changedMask is not set")
+        if self.changeMask is None:
+            raise ValueError("changeMask is not set")
         if not 0 <= index < BUTTON_COUNT:
-            raise ValueError(f"index must be in range 0..{BUTTON_COUNT-1}")
-        return bool((self.changedMask >> index) & 1)
+            raise IndexError(f"index must be in range 0..{BUTTON_COUNT-1}")
+        return bool((self.changeMask >> index) & 1)
 
     def isButtonDown(self, index: int) -> bool:
         """Check if a button is currently down."""
@@ -96,9 +74,7 @@ class Streamdeck:
 
     def __init__(self) -> None:
         # Initialize with a report indicating all buttons up
-        header = [0x01, 0x00, 0x0f, 0x00]
-        payload = [0x00] * 508
-        self._buffer = [InputReport(bytes(header + payload))]
+        self._buffer = [InputReport()]
         self._value = 0
         # Initialize a logical model, all switches off
         self._model = [Button() for _ in range(BUTTON_COUNT)]
@@ -242,15 +218,15 @@ class Streamdeck:
             index = btn["index"]
             position = btn["position"]
             duration_ms = btn.get("duration_ms") 
-            self._model[index]["timestamp"] = hwEvent["timestamp"]
-            self._model[index]["position"] = position
+            self._model[index].timestamp = hwEvent["timestamp"]
+            self._model[index].position = position
 
             if position == 0:
                 stateChange = True
                 level = 1 if duration_ms < 1000 else 2
-                self._model[index]["state"] = level if self._model[index]["state"] == 0 else 0
-                self._repaintButton(index, self._model[index]["state"])
-        return [x["state"] for x in self._model] if stateChange else None
+                self._model[index].state = level if self._model[index].state == 0 else 0
+                self._repaintButton(index, self._model[index].state)
+        return [x.state for x in self._model] if stateChange else None
 
     def _computeChanges(self, report) -> Dict:
         # Accept either raw bytes or an InputReport instance
@@ -265,8 +241,8 @@ class Streamdeck:
         # values for attributes that depend on the previous report
         # i.e. the last one in the buffer.
 
-        rpt.changedMask = self._buffer[-1].value ^ rpt.value
-        rpt.changedCount = rpt.changedMask.bit_count()
+        rpt.changeMask = self._buffer[-1].value ^ rpt.value
+        rpt.changeCount = rpt.changeMask.bit_count()
         rpt.eventType = self._determineEventType(rpt)
 
         # What's thhe logic for a "switch" or for a "long-press"?
@@ -325,8 +301,8 @@ class Streamdeck:
                     # a wake up because we're assuming a wake up will look like
                     # no buttons have changed state.
                     ms =0
-                    if self._model[i]["timestamp"] > 0 and (self._model[i]["position"] != obj["position"]) :
-                        ms = rpt.timestamp - self._model[i]["timestamp"]
+                    if self._model[i].timestamp > 0 and (self._model[i].position != obj["position"]) :
+                        ms = rpt.timestamp - self._model[i].timestamp
                     obj["duration_ms"] = ms
 
                 changedButtons.append(obj)
@@ -337,8 +313,8 @@ class Streamdeck:
             "timestamp": rpt.timestamp,
             "eventType": rpt.eventType,
             "value": rpt.value,
-            "changeMask": rpt.changedMask,
-            "changeCount": rpt.changedCount,
+            "changeMask": rpt.changeMask,
+            "changeCount": rpt.changeCount,
             "detail": changedButtons,
         }
         self._buffer.append(rpt)
@@ -358,22 +334,22 @@ def run():
     payload = [0x00] * 508
     report = bytearray(header + payload)
 
-    # Simulate: button 0 pressed
+    # # Simulate: button 0 pressed
     report[4] = 0x01
-    rpt = InputReport(bytes(report))
+    rpt = InputReport(report)
     sd.handle_hid_input_report(rpt)
 
     time.sleep(1.5)
     # Simulate: button 0 released, button 3 pressed
     report[4] = 0x00
     report[7] = 0x01
-    rpt = InputReport(bytes(report))
+    rpt = InputReport(report)
     sd.handle_hid_input_report(rpt)
 
     time.sleep(0.5) 
-    # Simulate button 3 released quickly
+    # # Simulate button 3 released quickly
     report[7] = 0x00
-    rpt = InputReport(bytes(report))
+    rpt = InputReport(report)
     sd.handle_hid_input_report(rpt)
 
 if __name__ == "__main__":
