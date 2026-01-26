@@ -27,7 +27,7 @@ class EventType(Enum):
 class InputReport:
     """Represents a parsed HID input report."""
 
-    def __init__(self, report: bytes = None):
+    def __init__(self, report: bytes | None = None):
         """Parse a 512-byte HID report into an InputReport instance."""
         self.timestamp = int(time.time() * 1000)
         
@@ -79,7 +79,7 @@ class Streamdeck:
         # Initialize a logical model, all switches off
         self._model = [Button() for _ in range(BUTTON_COUNT)]
 
-    def _determineEventType(self, report: InputReport) -> int:
+    def _determineEventType(self, report: InputReport) -> int | None:
         """
         Compare the current report to the previous report to
         characterize the type of event.  Returns one of the following
@@ -112,7 +112,7 @@ class Streamdeck:
     
         return None
     
-    def handle_hid_input_report(self, report) -> Dict:
+    def handle_hid_input_report(self, report) -> None:
         hwEvent = self._computeChanges(report)
         eventData = None
         if hwEvent["changeCount"] > 0:
@@ -127,75 +127,75 @@ class Streamdeck:
         if eventData is not None:
             print(eventData)
             res = self._sendEventData(eventData)
-            self._showResult(res)
+            self._showResult(res[1])
 
-    def _sendEventData(self, payload: Dict) -> Tuple[int, str]:
+    def _sendEventData(self, payload: List[int]) -> Tuple[int, str]:
         """Stub for sending event data to another system.
         """
         return 200, "OK"
     
-    def _sendEventData_MQTT(self, payload: Dict) -> Tuple[int, str]:
-        """Send the event data to MQTT broker.
+    # def _sendEventData_MQTT(self, payload: Dict) -> Tuple[int, str]:
+    #     """Send the event data to MQTT broker.
         
-        Connects to the MQTT broker, publishes the event, and disconnects.
-        Since events are infrequent, a new connection is created per event.
+    #     Connects to the MQTT broker, publishes the event, and disconnects.
+    #     Since events are infrequent, a new connection is created per event.
         
-        Args:
-            payload: Dictionary containing event data to publish
+    #     Args:
+    #         payload: Dictionary containing event data to publish
             
-        Returns:
-            Tuple of (status_code, message)
-        """
-        try:
-            # MQTT configuration
-            broker = "localhost"
-            port = 1883
-            topic = "streamdeck/events"
+    #     Returns:
+    #         Tuple of (status_code, message)
+    #     """
+    #     try:
+    #         # MQTT configuration
+    #         broker = "localhost"
+    #         port = 1883
+    #         topic = "streamdeck/events"
             
-            # Create MQTT client and set up callbacks
-            client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1)
+    #         # Create MQTT client and set up callbacks
+    #         client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1)
             
-            def on_connect(client, userdata, flags, rc):
-                if rc != 0:
-                    raise mqtt.MQTTException(f"Connection failed with code {rc}")
+    #         def on_connect(client, userdata, flags, rc):
+    #             if rc != 0:
+    #                 raise mqtt.MQTTException(f"Connection failed with code {rc}")
             
-            def on_publish(client, userdata, mid):
-                pass
+    #         def on_publish(client, userdata, mid):
+    #             pass
             
-            def on_disconnect(client, userdata, rc):
-                pass
+    #         def on_disconnect(client, userdata, rc):
+    #             pass
             
-            client.on_connect = on_connect
-            client.on_publish = on_publish
-            client.on_disconnect = on_disconnect
+    #         client.on_connect = on_connect
+    #         client.on_publish = on_publish
+    #         client.on_disconnect = on_disconnect
             
-            # Connect to broker
-            client.connect(broker, port, keepalive=5)
+    #         # Connect to broker
+    #         client.connect(broker, port, keepalive=5)
             
-            # Publish the event data as JSON
-            message = json.dumps(payload)
-            result = client.publish(topic, message, qos=1)
+    #         # Publish the event data as JSON
+    #         message = json.dumps(payload)
+    #         result = client.publish(topic, message, qos=1)
             
-            # Wait for publish to complete
-            client.loop(timeout=1.0)
+    #         # Wait for publish to complete
+    #         client.loop(timeout=1.0)
             
-            # Disconnect
-            client.disconnect()
+    #         # Disconnect
+    #         client.disconnect()
             
-            if result.rc == mqtt.MQTT_ERR_SUCCESS:
-                return 200, "Event published successfully"
-            else:
-                return 400, f"Failed to publish: {mqtt.error_string(result.rc)}"
+    #         if result.rc == mqtt.MQTT_ERR_SUCCESS:
+    #             return 200, "Event published successfully"
+    #         else:
+    #             return 400, f"Failed to publish: {mqtt.error_string(result.rc)}"
                 
-        except Exception as e:
-            return 500, f"MQTT error: {str(e)}"
+    #     except Exception as e:
+    #         return 500, f"MQTT error: {str(e)}"
 
     def _showResult(self, res: str) -> None:
         """Stub: show the result of sending event data.
         """
         print(f"Result: {res}")
 
-    def _updateModel(self, hwEvent: Dict) -> Dict:
+    def _updateModel(self, hwEvent: Dict) -> List[int] | None:
         """Update the internal model based on the changes detected
         in the input report.  Returns event data for further processing.
         """
@@ -265,7 +265,7 @@ class Streamdeck:
         # The steps above calculate attributes for the event by looking at
         # deltas from the previous report.  Now we look at each button.
 
-        changedButtons: List[Dict[str, Optional[int]]] = []
+        changedButtons: List[Dict[str, int]] = []
 
         # Iterate over the report payload (each button)
         # Get the profile for the button and call the appropriate handler.
