@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
+import threading
 import time
-import json
-from typing import List, Dict, Optional, Tuple
+
+from concurrent.futures import Future
 from dataclasses import dataclass
 from enum import Enum
+from pyhidapi.hid import Device
+from queue import Queue, Empty
+from typing import List, Dict, Tuple
+
 
 # import paho.mqtt.client as mqtt
 # import pyhidapi.hid
@@ -16,12 +21,294 @@ class Button:
     timestamp: int = 0
     position: int = 0
 
+#
+# HID Reports
+#   > These are used internally, they get put into a queue that background
+#     thread is watching.
+#   
+
+@dataclass
+class DeviceInfoReport:
+    future: Future
+
+@dataclass
+class SetFeatureReport:
+    raw: bytes
+    future: Future
+
+@dataclass
+class GetFeatureReport:
+    reportId: int
+    future: Future
+
+@dataclass
+class OutputReport:
+    raw: bytes
+    future: Future
+
 class EventType(Enum):
     KEY_UP = 0
     KEY_DOWN = 1
     KEY_UP_DOWN = 2
     WAKE_UP = 3
     NO_CHANGE = 4
+
+class Driver():
+
+    def __init__(self):
+        """Start a background thread that will manage the hardware connection."""
+        
+        # Briefly open a connection to the device to read basic info
+        with Device(0x0fd9, 0x0080) as dev:
+            self.deviceInfo = {
+                "manufacturer": dev.manufacturer,
+                "product": dev.product,
+                "serial": dev.serial
+            }
+
+        # Want to start the background worker now so the public API is ready.
+        self._rx = Queue()
+        self._tx = Queue()
+        thread = threading.Thread(
+            target=self._hidLoop,
+            args=(self._rx, self._tx),
+            daemon=True,
+            name="Driver"
+        )
+        thread.start()
+
+    @property
+    def msgQ(self) -> Queue:
+        return self._rx
+
+    def start(self):
+        self._tx.put("start")
+
+    #
+    # =========================================================================
+    #   Feature Reports - Getters
+    #   https://docs.elgato.com/streamdeck/hid/module-15_32#feature-report---getters
+    # =========================================================================
+    #
+
+    def getUnitSerialNumber(self) -> str:
+        """Request the unit's serial number string"""
+        offset = 2
+        res = self._getFeatureReport(0x06)
+        return res[offset:offset+res[1]].decode("utf8")
+        
+    def getIdleSecondsBeforeSleep(self):
+        """Request the duration, in seconds, of idle before the unit enters Sleep Mode."""
+        offset = 2
+        res = self._getFeatureReport(0x0a)
+        return int.from_bytes(res[offset:offset + res[1]], "little")
+
+    def getUnitInformation(self):
+        """Request information about the unit, including keypad matrix layout, LCD geometry and more."""
+        res = self._getFeatureReport(0x08)
+        return {
+            "keypadRows": res[1],
+            "keypadColumns": res[2],
+            "keyWidth": int.from_bytes(res[3:4]),
+            "keyHeight": int.from_bytes(res[5:6]),
+            "lcdWidth": int.from_bytes(res[7:8]),
+            "lcdHeight": int.from_bytes(res[9:10]),
+            "imageColorScheme": res[12],
+            "numKeyImages": res[13],
+            "numLcdImages": res[14],
+            "numDemoFrames": res[15]
+        }
+
+    #
+    # =========================================================================
+    #   Feature Reports - Setters
+    #   https://docs.elgato.com/streamdeck/hid/module-15_32#feature-report---setters
+    # =========================================================================
+    #
+
+    def showLogo(self):
+        """Forcibly trigger the display of the boot logo."""
+        report = bytearray(32)
+        report[0:2] = (0x03, 0x02)
+        return self._sendFeatureReport(report)
+
+    def fillLcdWithColor(self, rgb: Tuple[int] | str | bytes):
+        """Fill the entire LCD with a given RGB color."""
+        value = self._validateColor(rgb)
+        report = bytearray(32)
+        report[0:2] = (0x03, 0x05)
+        report[2:5] = value
+        return self._sendFeatureReport(report)
+
+    def fillKeyWithColor(self, index: int, rgb: Tuple[int] | str | bytes):
+        """Fill a single key with a given RGB color."""
+        if not 0 <= index <= (BUTTON_COUNT-1):
+            raise ValueError(f"Invalid button index: {index}")
+        value = self._validateColor(rgb)
+        report = bytearray(32)
+        report[0:3] = (0x03, 0x06, index)
+        report[3:6] = value
+        return self._sendFeatureReport(report)
+
+    def setBacklightBrightness(self, value: int):
+        """Set the LCD backlight brightness."""
+        value = value if 0 <= value <= 100 else 100
+        report = bytearray(32)
+        report[0:4] = (0x03, 0x08, value)
+        return self._sendFeatureReport(report)
+    
+    def setIdleTimeBeforeSleep(self, value: int):
+        """Set the duration, in seconds, of idle before the unit enters Sleep Mode."""
+        report = bytearray(32)
+        report[0:2] = (0x03, 0x0D)
+        report[2:6] = value.to_bytes(length=4, byteorder="little", signed=False)
+        return self._sendFeatureReport(report)
+    
+    def showBackgroundByIndex(self, index: int):
+        """Show the background stored at the specified index."""
+        if not 0 <= index <= 255:
+            raise ValueError("index must be UINT8")
+        report = bytearray(32)
+        report[0:3] = (0x03, 0x13, index)
+        return self._sendFeatureReport(report)
+        
+    # =========================================================================
+    #   P R I V A T E
+    # =========================================================================
+        
+    def _hidLoop(self, rx: Queue, tx: Queue) -> None:
+        """This function runs on a background thread, watching for messages on rx,
+        putting messages into tx."""
+
+        # These are intentionally flipped. The method signature is designed to
+        # match the caller's perspective. The first argument passed by the
+        # caller is the Queue that it will use to RECEIVE data, the second
+        # argument is the Queue it will TRANSMIT data.
+        #
+        # For sanity, the assignments are flipped so in this method
+        # we can use tx.put() and rx.get().
+        rx = tx
+        tx = rx
+
+        doPoll = False
+
+        # Instantiating the `Device` class opens the connection
+        VID, PID = (0x0fd9, 0x0080)
+        # dev = hid.Device(VID, PID)
+
+        model = Streamdeck()
+
+        print(f"[{threading.current_thread().name}] started")
+        
+        with Device(VID, PID) as dev:        
+            dev.nonblocking = 1
+            
+            while True:
+
+                #
+                #  Watch the RX queue first, messages coming in here are
+                # "commands" to the device. Expect the main thread to send 
+                # request serial number, unit info, then give the signal to
+                # start polling for HID input reports.
+                #
+                try:
+                    cmd = rx.get(block=False) if doPoll else rx.get(timeout=2)
+                    
+                    if isinstance(cmd, DeviceInfoReport):
+                        cmd.future.set_result({
+                            "manufacturer": dev.manufacturer,
+                            "product": dev.product,
+                            "serial": dev.serial
+                        })
+
+                    elif isinstance(cmd, GetFeatureReport):
+                        res = dev.get_feature_report(cmd.reportId, 32)
+                        cmd.future.set_result(res)
+                
+                    elif isinstance(cmd, SetFeatureReport):
+                        res = dev.set_feature_report(cmd.raw)
+                        cmd.future.set_result(res)
+                    
+                    elif isinstance(cmd, OutputReport):
+                        pass
+
+                    elif isinstance(cmd, str):
+                        if cmd == "start":
+                            doPoll = True
+
+                except Empty:
+                    print("EX: [Driver] read from RX.")
+                    if not doPoll:
+                        time.sleep(0.2)
+
+                #
+                # Poll the hardware for input reports.
+                #
+                if not doPoll:
+                    continue
+
+                rawReport = dev.read(size=512, timeout=50)
+
+                if rawReport is not None:            
+                    newState = model.handle_hid_input_report(rawReport)
+                    if newState is not None:
+                        # Pipe the 
+                        tx.put(newState, block=False)
+
+
+    def _validateColor(self, rgb: Tuple[int] | str | bytes) -> bytes:
+        
+        value = None
+        if isinstance(rgb, tuple) and \
+            len(rgb) == 3 and \
+            isinstance(rgb[0], int) and (0 <= rgb[0] <= 255) and \
+            isinstance(rgb[1], int) and (0 <= rgb[1] <= 255) and \
+            isinstance(rgb[2], int) and (0 <= rgb[2] <= 255):
+            value = bytes(rgb)
+        
+        if isinstance(rgb, str):
+            if len(rgb) == 6:
+                value = bytes.fromhex(rgb)
+            elif len(rgb) == 7 and rgb.startswith("#"):
+                value = bytes.fromhex(rgb[1:])
+
+        if isinstance(rgb, bytes) and len(rgb) == 3:
+            value = rgb
+
+        if value is None:
+            raise ValueError(f"Invalid value for argument 'rgb' {type(rgb)}")
+        
+        return value
+
+    def _sendFeatureReport(self, report: bytearray | bytes) -> None:
+        # This method is called from the main thread.
+        # This method is given bytes, use the bytes to
+        # construct a Command, which will also hold a Future.
+        #
+        # The command is then put into the queue that the background
+        # thread is watching.  Then we wait for the future to be 
+        # completed.  The background thread will see the command
+        # and complete the future.
+        #
+        # The future will either have a result or an exception.
+        # Whichever, that will close out the method.
+        #
+        if isinstance(report, bytearray):
+            report = bytes(report)
+
+        future = Future()
+        rpt = SetFeatureReport(report, future)
+        self._tx.put(rpt, block=False)
+        return rpt.future.result(timeout=5)
+
+    def _getFeatureReport(self, reportId) -> bytes:
+        future: Future[bytes] = Future()
+        report = GetFeatureReport(reportId, future)
+        try:
+            self._tx.put(report, block=False)
+            return future.result(timeout=3)
+        except Empty as e:
+            print("Failed to add GetFeatureReport to queue")
 
 
 class InputReport:
@@ -326,31 +613,31 @@ class Streamdeck:
         """
         pass
 
-def run():
-    sd = Streamdeck()
+# def run():
+#     sd = Streamdeck()
 
-    # Build a 512-byte report: header (4 bytes) + 15-byte button payload + padding
-    header = [0x01, 0x00, 0x0f, 0x00]
-    payload = [0x00] * 508
-    report = bytearray(header + payload)
+#     # Build a 512-byte report: header (4 bytes) + 15-byte button payload + padding
+#     header = [0x01, 0x00, 0x0f, 0x00]
+#     payload = [0x00] * 508
+#     report = bytearray(header + payload)
 
-    # # Simulate: button 0 pressed
-    report[4] = 0x01
-    rpt = InputReport(report)
-    sd.handle_hid_input_report(rpt)
+#     # # Simulate: button 0 pressed
+#     report[4] = 0x01
+#     rpt = InputReport(report)
+#     sd.handle_hid_input_report(rpt)
 
-    time.sleep(1.5)
-    # Simulate: button 0 released, button 3 pressed
-    report[4] = 0x00
-    report[7] = 0x01
-    rpt = InputReport(report)
-    sd.handle_hid_input_report(rpt)
+#     time.sleep(1.5)
+#     # Simulate: button 0 released, button 3 pressed
+#     report[4] = 0x00
+#     report[7] = 0x01
+#     rpt = InputReport(report)
+#     sd.handle_hid_input_report(rpt)
 
-    time.sleep(0.5) 
-    # # Simulate button 3 released quickly
-    report[7] = 0x00
-    rpt = InputReport(report)
-    sd.handle_hid_input_report(rpt)
+#     time.sleep(0.5) 
+#     # # Simulate button 3 released quickly
+#     report[7] = 0x00
+#     rpt = InputReport(report)
+#     sd.handle_hid_input_report(rpt)
 
-if __name__ == "__main__":
-    run()
+# if __name__ == "__main__":
+#     run()

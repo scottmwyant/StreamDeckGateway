@@ -2,7 +2,7 @@
 
 import unittest
 import time
-from main import InputReport, Streamdeck, BUTTON_COUNT
+from driver import InputReport, Streamdeck, BUTTON_COUNT
 
 
 class TestInputReport(unittest.TestCase):
