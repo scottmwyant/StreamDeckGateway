@@ -1,23 +1,31 @@
 import time
 from driver import Driver
+from queue import Queue, Empty
 
 
 def run():
-
+    print("\n=== Stream Deck Gateway ===")
+    
+    # Instantiate the driver
     driver = Driver()
     print(driver.deviceInfo)
-    return 
-
+    
+    # Begin polling hardware.
+    # Driver will put events into a Queue
     driver.start()
-
+    
     try:
         while True:
             # Get events from the driver
-            newState = driver.msgQ.get(block=False)
-            print(f"newState: {newState}")
+            event = driver.getEvent()
+            if event:
+                print(f"event: {event}")
+            else:
+                print("No event")
             time.sleep(0.5)
     except KeyboardInterrupt:
         print("Stopping...")
+
 
 # def run():
 #     """This is is where we orchestrate the producer/consumer pattern."""

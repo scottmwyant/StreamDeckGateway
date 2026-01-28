@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pyhidapi.hid import Device
 from queue import Queue, Empty
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 
 
 # import paho.mqtt.client as mqtt
@@ -46,27 +46,51 @@ class OutputReport:
     raw: bytes
     future: Future
 
+@dataclass
+class ChangeDetail:
+    index: int
+    position: int
+    duration_ms: int | None
+
+@dataclass
+class HardwareEvent:
+    timestamp: int
+    eventType: int
+    value: int
+    changeMask: int
+    changeCount: int
+    detail: List[ChangeDetail]
+
 class EventType(Enum):
     KEY_UP = 0
     KEY_DOWN = 1
     KEY_UP_DOWN = 2
     WAKE_UP = 3
     NO_CHANGE = 4
+    UNKNOWN=5
 
 class Driver():
 
+    VID = 0x0fd9
+    PID = 0x0080
+
     def __init__(self):
         """Start a background thread that will manage the hardware connection."""
-        
-        # Briefly open a connection to the device to read basic info
-        with Device(0x0fd9, 0x0080) as dev:
-            self.deviceInfo = {
-                "manufacturer": dev.manufacturer,
-                "product": dev.product,
-                "serial": dev.serial
-            }
+        self._doPoll = False
 
-        # Want to start the background worker now so the public API is ready.
+        # Briefly open a connection to the device to read basic info
+        # with Device(self.VID, self.PID) as dev:
+        #     self.deviceInfo = {
+        #         "manufacturer": dev.manufacturer,
+        #         "product": dev.product,
+        #         "serial": dev.serial
+        #     }
+
+        #
+        # Start the background thread now so the public API is ready.
+        # We won't start polling the device for input reports until the main
+        # thread calls .start(), but we're in position to apply a configuration
+        #
         self._rx = Queue()
         self._tx = Queue()
         thread = threading.Thread(
@@ -77,12 +101,29 @@ class Driver():
         )
         thread.start()
 
+        # When the background thread starts, device info object is put into the
+        # queue, it's immidiately pulled out and merged with the result from
+        # 'getUnitInformation'.
+        device = self._rx.get(timeout=10.0)
+        self.deviceInfo: Dict = self.getUnitInformation()
+        keys = ("manufacturer", "product", "serial")
+        self.deviceInfo.update({k: device[k] for k in keys})
+        BUTTON_COUNT = self.deviceInfo["keypadRows"] * self.deviceInfo["keypadColumns"]
+        print(f"Updated button count: {BUTTON_COUNT}")
+
     @property
-    def msgQ(self) -> Queue:
+    def eventQ(self) -> Queue:
         return self._rx
 
     def start(self):
-        self._tx.put("start")
+        print("[Driver] Begin polling hardware")
+        self._doPoll = True
+
+    def getEvent(self):
+        try:
+            return self.eventQ.get(block=False)
+        except:
+            return None
 
     #
     # =========================================================================
@@ -175,87 +216,26 @@ class Driver():
     # =========================================================================
     #   P R I V A T E
     # =========================================================================
-        
-    def _hidLoop(self, rx: Queue, tx: Queue) -> None:
-        """This function runs on a background thread, watching for messages on rx,
-        putting messages into tx."""
+    
+    def _getFeatureReport(self, reportId) -> bytes:
+        future: Future[bytes] = Future()
+        report = GetFeatureReport(reportId, future)
+        try:
+            self._tx.put(report, block=False)
+            return future.result(timeout=3)
+        except Empty as e:
+            print("Failed to add GetFeatureReport to queue")
+            raise
 
-        # These are intentionally flipped. The method signature is designed to
-        # match the caller's perspective. The first argument passed by the
-        # caller is the Queue that it will use to RECEIVE data, the second
-        # argument is the Queue it will TRANSMIT data.
-        #
-        # For sanity, the assignments are flipped so in this method
-        # we can use tx.put() and rx.get().
-        rx = tx
-        tx = rx
+    def _sendFeatureReport(self, report: bytearray | bytes) -> None:
+        if isinstance(report, bytearray):
+            report = bytes(report)
 
-        doPoll = False
-
-        # Instantiating the `Device` class opens the connection
-        VID, PID = (0x0fd9, 0x0080)
-        # dev = hid.Device(VID, PID)
-
-        model = Streamdeck()
-
-        print(f"[{threading.current_thread().name}] started")
-        
-        with Device(VID, PID) as dev:        
-            dev.nonblocking = 1
-            
-            while True:
-
-                #
-                #  Watch the RX queue first, messages coming in here are
-                # "commands" to the device. Expect the main thread to send 
-                # request serial number, unit info, then give the signal to
-                # start polling for HID input reports.
-                #
-                try:
-                    cmd = rx.get(block=False) if doPoll else rx.get(timeout=2)
-                    
-                    if isinstance(cmd, DeviceInfoReport):
-                        cmd.future.set_result({
-                            "manufacturer": dev.manufacturer,
-                            "product": dev.product,
-                            "serial": dev.serial
-                        })
-
-                    elif isinstance(cmd, GetFeatureReport):
-                        res = dev.get_feature_report(cmd.reportId, 32)
-                        cmd.future.set_result(res)
-                
-                    elif isinstance(cmd, SetFeatureReport):
-                        res = dev.set_feature_report(cmd.raw)
-                        cmd.future.set_result(res)
-                    
-                    elif isinstance(cmd, OutputReport):
-                        pass
-
-                    elif isinstance(cmd, str):
-                        if cmd == "start":
-                            doPoll = True
-
-                except Empty:
-                    print("EX: [Driver] read from RX.")
-                    if not doPoll:
-                        time.sleep(0.2)
-
-                #
-                # Poll the hardware for input reports.
-                #
-                if not doPoll:
-                    continue
-
-                rawReport = dev.read(size=512, timeout=50)
-
-                if rawReport is not None:            
-                    newState = model.handle_hid_input_report(rawReport)
-                    if newState is not None:
-                        # Pipe the 
-                        tx.put(newState, block=False)
-
-
+        future = Future()
+        rpt = SetFeatureReport(report, future)
+        self._tx.put(rpt, block=False)
+        return rpt.future.result(timeout=5)
+    
     def _validateColor(self, rgb: Tuple[int] | str | bytes) -> bytes:
         
         value = None
@@ -279,36 +259,80 @@ class Driver():
             raise ValueError(f"Invalid value for argument 'rgb' {type(rgb)}")
         
         return value
+    
+    # =========================================================================
+    #   H I D    T H R E A D
+    # =========================================================================
+        
+    def _hidLoop(self, rx: Queue, tx: Queue) -> None:
+        """This function runs on a background thread, watching for messages on rx,
+        putting messages into tx."""
 
-    def _sendFeatureReport(self, report: bytearray | bytes) -> None:
-        # This method is called from the main thread.
-        # This method is given bytes, use the bytes to
-        # construct a Command, which will also hold a Future.
+        # These are intentionally flipped. The method signature is designed to
+        # match the caller's perspective. The first argument passed by the
+        # caller is the Queue that it will use to RECEIVE data, the second
+        # argument is the Queue it will TRANSMIT data.
         #
-        # The command is then put into the queue that the background
-        # thread is watching.  Then we wait for the future to be 
-        # completed.  The background thread will see the command
-        # and complete the future.
-        #
-        # The future will either have a result or an exception.
-        # Whichever, that will close out the method.
-        #
-        if isinstance(report, bytearray):
-            report = bytes(report)
+        # For sanity, the assignments are flipped so in this method
+        # we can use _tx.put() and _rx.get().
+        _rx = tx
+        _tx = rx
+        
 
-        future = Future()
-        rpt = SetFeatureReport(report, future)
-        self._tx.put(rpt, block=False)
-        return rpt.future.result(timeout=5)
+        model = Streamdeck()
 
-    def _getFeatureReport(self, reportId) -> bytes:
-        future: Future[bytes] = Future()
-        report = GetFeatureReport(reportId, future)
-        try:
-            self._tx.put(report, block=False)
-            return future.result(timeout=3)
-        except Empty as e:
-            print("Failed to add GetFeatureReport to queue")
+        tname = f"[{threading.current_thread().name}]"
+        print(f"{tname} started")
+        
+        with Device(self.VID, self.PID) as dev: 
+            dev.nonblocking = 1
+            
+            # First message goes into the queue
+            _tx.put({
+                    "manufacturer": dev.manufacturer,
+                    "product": dev.product,
+                    "serial": dev.serial
+                },
+                block=False,
+                timeout=0.5
+            )
+
+            # Watch for events coming in from the main thread then watch HID.
+            # Block on the HID read to maximize responsiveness on that end.
+            while True:
+
+                try:
+                    cmd = _rx.get(timeout=2)
+
+                    if isinstance(cmd, GetFeatureReport):
+                        res = dev.get_feature_report(cmd.reportId, 32)
+                        cmd.future.set_result(res)
+                
+                    elif isinstance(cmd, SetFeatureReport):
+                        res = dev.set_feature_report(cmd.raw)
+                        cmd.future.set_result(res)
+                    
+                    elif isinstance(cmd, OutputReport):
+                        pass
+
+                except Empty:
+                    print(f"{tname} RX is empty.")
+                    if not self._doPoll:
+                        time.sleep(0.2)
+
+                # Watch for HID input report
+                rawReport: bytes = dev.read(size=512, timeout=50)
+                if len(rawReport):
+                    print(f"{tname} HID report length: {len(rawReport)}")
+                    newState = model.handle_hid_input_report(rawReport)
+                    if newState:
+                        _tx.put(newState, block=False)
+
+
+
+
+
+
 
 
 class InputReport:
@@ -366,7 +390,7 @@ class Streamdeck:
         # Initialize a logical model, all switches off
         self._model = [Button() for _ in range(BUTTON_COUNT)]
 
-    def _determineEventType(self, report: InputReport) -> int | None:
+    def _determineEventType(self, report: InputReport) -> int:
         """
         Compare the current report to the previous report to
         characterize the type of event.  Returns one of the following
@@ -397,29 +421,17 @@ class Streamdeck:
         if isUp and isDown:
             return EventType.KEY_UP_DOWN.value
     
-        return None
+        return EventType.UNKNOWN.value
     
-    def handle_hid_input_report(self, report) -> None:
+    def handle_hid_input_report(self, report: bytes) -> List[int] | None:
         hwEvent = self._computeChanges(report)
-        eventData = None
-        if hwEvent["changeCount"] > 0:
-            eventData = self._updateModel(hwEvent)
+        print(f"hwEvent: {hwEvent}")
+        if hwEvent.changeCount > 0:
+            newState = self._updateModel(hwEvent)
+            print(f"newState: {newState}")
+            return newState
 
-        # Construct a payload that contains
-        #  - Manufacturer
-        #  - Model
-        #  - Serial number
-        #  - Firmware version
-        #  - Button states
-        if eventData is not None:
-            print(eventData)
-            res = self._sendEventData(eventData)
-            self._showResult(res[1])
 
-    def _sendEventData(self, payload: List[int]) -> Tuple[int, str]:
-        """Stub for sending event data to another system.
-        """
-        return 200, "OK"
     
     # def _sendEventData_MQTT(self, payload: Dict) -> Tuple[int, str]:
     #     """Send the event data to MQTT broker.
@@ -482,7 +494,7 @@ class Streamdeck:
         """
         print(f"Result: {res}")
 
-    def _updateModel(self, hwEvent: Dict) -> List[int] | None:
+    def _updateModel(self, hwEvent: HardwareEvent) -> List[int] | None:
         """Update the internal model based on the changes detected
         in the input report.  Returns event data for further processing.
         """
@@ -501,21 +513,20 @@ class Streamdeck:
         # Maybe send an array of integer values (0,1,2).
 
         stateChange = False
-        for btn in hwEvent["detail"]:
-            index = btn["index"]
-            position = btn["position"]
-            duration_ms = btn.get("duration_ms") 
-            self._model[index].timestamp = hwEvent["timestamp"]
+        for btn in hwEvent.detail:
+            index = btn.index
+            position = btn.position
+            self._model[index].timestamp = hwEvent.timestamp
             self._model[index].position = position
 
             if position == 0:
                 stateChange = True
-                level = 1 if duration_ms < 1000 else 2
+                level = 1 if (btn.duration_ms if btn.duration_ms is not None else 0) < 1000 else 2
                 self._model[index].state = level if self._model[index].state == 0 else 0
                 self._repaintButton(index, self._model[index].state)
         return [x.state for x in self._model] if stateChange else None
 
-    def _computeChanges(self, report) -> Dict:
+    def _computeChanges(self, report: InputReport | bytearray | bytes) -> HardwareEvent:
         # Accept either raw bytes or an InputReport instance
         if isinstance(report, InputReport):
             rpt = report
@@ -552,7 +563,7 @@ class Streamdeck:
         # The steps above calculate attributes for the event by looking at
         # deltas from the previous report.  Now we look at each button.
 
-        changedButtons: List[Dict[str, int]] = []
+        changedButtons: List[ChangeDetail] = []
 
         # Iterate over the report payload (each button)
         # Get the profile for the button and call the appropriate handler.
@@ -563,7 +574,7 @@ class Streamdeck:
         # for the given button.
         for i in range(BUTTON_COUNT):
             if rpt.hasButtonChanged(i):
-                obj = {"index": i, "position": int(rpt.isButtonDown(i))}                
+                obj = ChangeDetail(i, int(rpt.isButtonDown(i)), None)
                 if not rpt.isButtonDown(i):
                     # Search the buffer for the most recent KeyDown event on this button
                     # to calculate duration.  If not found, duration is 0.
@@ -575,7 +586,7 @@ class Streamdeck:
                         e = self._buffer[-1 - x]
                         if e.isButtonDown(i):
                                 ms = rpt.timestamp - e.timestamp
-                    obj["duration_ms"] = ms
+                    obj.duration_ms = ms
 
 
                     # Get the timestamp for the inverse state from the model...
@@ -588,25 +599,19 @@ class Streamdeck:
                     # a wake up because we're assuming a wake up will look like
                     # no buttons have changed state.
                     ms =0
-                    if self._model[i].timestamp > 0 and (self._model[i].position != obj["position"]) :
+                    if self._model[i].timestamp > 0 and (self._model[i].position != obj.position) :
                         ms = rpt.timestamp - self._model[i].timestamp
-                    obj["duration_ms"] = ms
+                    obj.duration_ms = ms
 
                 changedButtons.append(obj)
 
 
         # Summarize results
-        result = {
-            "timestamp": rpt.timestamp,
-            "eventType": rpt.eventType,
-            "value": rpt.value,
-            "changeMask": rpt.changeMask,
-            "changeCount": rpt.changeCount,
-            "detail": changedButtons,
-        }
+        hwEvent = HardwareEvent(rpt.timestamp, rpt.eventType, rpt.value,
+                                    rpt.changeMask, rpt.changeCount, changedButtons)
+    
         self._buffer.append(rpt)
-        print(result)
-        return result
+        return hwEvent
 
     def _repaintButton(self, index: int, state: int) -> None:
         """Stub: repaint the button at the given index to reflect the given state.
