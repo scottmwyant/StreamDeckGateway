@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import logging
 import threading
 import time
 
@@ -7,11 +8,9 @@ from dataclasses import dataclass
 from enum import Enum
 from pyhidapi.hid import Device
 from queue import Queue, Empty
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Any
 
-
-# import paho.mqtt.client as mqtt
-# import pyhidapi.hid
+log = logging.getLogger(__name__)
 
 BUTTON_COUNT = 15
 
@@ -20,12 +19,6 @@ class Button:
     state: int = 0
     timestamp: int = 0
     position: int = 0
-
-#
-# HID Reports
-#   > These are used internally, they get put into a queue that background
-#     thread is watching.
-#   
 
 @dataclass
 class DeviceInfoReport:
@@ -76,16 +69,7 @@ class Driver():
 
     def __init__(self):
         """Start a background thread that will manage the hardware connection."""
-        self._doPoll = False
-
-        # Briefly open a connection to the device to read basic info
-        # with Device(self.VID, self.PID) as dev:
-        #     self.deviceInfo = {
-        #         "manufacturer": dev.manufacturer,
-        #         "product": dev.product,
-        #         "serial": dev.serial
-        #     }
-
+        self._doHid = False
         #
         # Start the background thread now so the public API is ready.
         # We won't start polling the device for input reports until the main
@@ -101,28 +85,28 @@ class Driver():
         )
         thread.start()
 
+        #
         # When the background thread starts, device info object is put into the
         # queue, it's immidiately pulled out and merged with the result from
         # 'getUnitInformation'.
-        device = self._rx.get(timeout=10.0)
+        #
+        device = self._rx.get(timeout=0.5)
         self.deviceInfo: Dict = self.getUnitInformation()
         keys = ("manufacturer", "product", "serial")
         self.deviceInfo.update({k: device[k] for k in keys})
         BUTTON_COUNT = self.deviceInfo["keypadRows"] * self.deviceInfo["keypadColumns"]
-        print(f"Updated button count: {BUTTON_COUNT}")
-
-    @property
-    def eventQ(self) -> Queue:
-        return self._rx
+        log.debug(f"Updated button count: {BUTTON_COUNT}")
 
     def start(self):
-        print("[Driver] Begin polling hardware")
-        self._doPoll = True
+        self._doHid = True
 
-    def getEvent(self):
+    def stop(self):
+        self._doHid = False
+
+    def getEvent(self) -> Tuple[Any] | None:
         try:
-            return self.eventQ.get(block=False)
-        except:
+            return self._rx.get(timeout=0.2)
+        except Empty:
             return None
 
     #
@@ -224,7 +208,7 @@ class Driver():
             self._tx.put(report, block=False)
             return future.result(timeout=3)
         except Empty as e:
-            print("Failed to add GetFeatureReport to queue")
+            log.info("Failed to add GetFeatureReport to queue")
             raise
 
     def _sendFeatureReport(self, report: bytearray | bytes) -> None:
@@ -268,6 +252,7 @@ class Driver():
         """This function runs on a background thread, watching for messages on rx,
         putting messages into tx."""
 
+        #
         # These are intentionally flipped. The method signature is designed to
         # match the caller's perspective. The first argument passed by the
         # caller is the Queue that it will use to RECEIVE data, the second
@@ -275,17 +260,13 @@ class Driver():
         #
         # For sanity, the assignments are flipped so in this method
         # we can use _tx.put() and _rx.get().
+        #
         _rx = tx
         _tx = rx
         
-
         model = Streamdeck()
-
-        tname = f"[{threading.current_thread().name}]"
-        print(f"{tname} started")
         
         with Device(self.VID, self.PID) as dev: 
-            dev.nonblocking = 1
             
             # First message goes into the queue
             _tx.put({
@@ -297,12 +278,14 @@ class Driver():
                 timeout=0.5
             )
 
+            #
             # Watch for events coming in from the main thread then watch HID.
             # Block on the HID read to maximize responsiveness on that end.
+            #
             while True:
-
                 try:
-                    cmd = _rx.get(timeout=2)
+                    ms = 50 if self._doHid else 500
+                    cmd = _rx.get(timeout=(ms/1000))
 
                     if isinstance(cmd, GetFeatureReport):
                         res = dev.get_feature_report(cmd.reportId, 32)
@@ -316,24 +299,14 @@ class Driver():
                         pass
 
                 except Empty:
-                    print(f"{tname} RX is empty.")
-                    if not self._doPoll:
-                        time.sleep(0.2)
-
-                # Watch for HID input report
-                rawReport: bytes = dev.read(size=512, timeout=50)
-                if len(rawReport):
-                    print(f"{tname} HID report length: {len(rawReport)}")
-                    newState = model.handle_hid_input_report(rawReport)
-                    if newState:
-                        _tx.put(newState, block=False)
-
-
-
-
-
-
-
+                    pass
+                
+                if self._doHid:
+                    rawReport: bytes = dev.read(size=512, timeout=50)
+                    if len(rawReport):
+                        newState = model.handle_hid_input_report(rawReport)
+                        if newState:
+                            _tx.put(newState, block=False)
 
 class InputReport:
     """Represents a parsed HID input report."""
@@ -425,10 +398,10 @@ class Streamdeck:
     
     def handle_hid_input_report(self, report: bytes) -> List[int] | None:
         hwEvent = self._computeChanges(report)
-        print(f"hwEvent: {hwEvent}")
+        log.debug(hwEvent)
         if hwEvent.changeCount > 0:
             newState = self._updateModel(hwEvent)
-            print(f"newState: {newState}")
+            # log.debug(newState)
             return newState
 
 
@@ -492,7 +465,8 @@ class Streamdeck:
     def _showResult(self, res: str) -> None:
         """Stub: show the result of sending event data.
         """
-        print(f"Result: {res}")
+        pass
+        # log.info(f"Result: {res}")
 
     def _updateModel(self, hwEvent: HardwareEvent) -> List[int] | None:
         """Update the internal model based on the changes detected
@@ -505,7 +479,7 @@ class Streamdeck:
 
         # The question is where do we set the threshold for long press?
         # Do we send the duration out to the higher level system?
-        # Seems config file would be apporpriate, so different systems do not
+        # Seems config file would be apporate, so different systems do not
         # have the opportunity to disagree on what a long-press is.
         # Keeping the logic local also enables immidiate feedback.
         #
@@ -617,32 +591,3 @@ class Streamdeck:
         """Stub: repaint the button at the given index to reflect the given state.
         """
         pass
-
-# def run():
-#     sd = Streamdeck()
-
-#     # Build a 512-byte report: header (4 bytes) + 15-byte button payload + padding
-#     header = [0x01, 0x00, 0x0f, 0x00]
-#     payload = [0x00] * 508
-#     report = bytearray(header + payload)
-
-#     # # Simulate: button 0 pressed
-#     report[4] = 0x01
-#     rpt = InputReport(report)
-#     sd.handle_hid_input_report(rpt)
-
-#     time.sleep(1.5)
-#     # Simulate: button 0 released, button 3 pressed
-#     report[4] = 0x00
-#     report[7] = 0x01
-#     rpt = InputReport(report)
-#     sd.handle_hid_input_report(rpt)
-
-#     time.sleep(0.5) 
-#     # # Simulate button 3 released quickly
-#     report[7] = 0x00
-#     rpt = InputReport(report)
-#     sd.handle_hid_input_report(rpt)
-
-# if __name__ == "__main__":
-#     run()

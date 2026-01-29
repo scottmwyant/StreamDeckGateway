@@ -1,71 +1,38 @@
-import time
+import json
+import logging
+import logging.config
+# import paho.mqtt.client as mqtt
+
+
+from pathlib import Path
+
+#
+# Logging configuration needs to be done early so other
+# modules will pick up the config.
+#
+configFile = Path(__file__).resolve().parent / "config.json"
+with open(configFile, "r", encoding="utf8") as cf:
+    config = json.load(cf)
+logging.config.dictConfig(config["logging.config"])
+
 from driver import Driver
-from queue import Queue, Empty
 
+log = logging.getLogger(__name__)
+log.info("--- Stream Deck Gateway ---")
 
-def run():
-    print("\n=== Stream Deck Gateway ===")
-    
-    # Instantiate the driver
-    driver = Driver()
-    print(driver.deviceInfo)
-    
-    # Begin polling hardware.
-    # Driver will put events into a Queue
-    driver.start()
-    
-    try:
-        while True:
-            # Get events from the driver
-            event = driver.getEvent()
-            if event:
-                print(f"event: {event}")
-            else:
-                print("No event")
-            time.sleep(0.5)
-    except KeyboardInterrupt:
-        print("Stopping...")
+#  Instantiate the driver
+driver = Driver()
+log.info(f"{driver.deviceInfo["manufacturer"]} {driver.deviceInfo["product"]} {driver.deviceInfo["serial"]}")
 
+# Begin listening for  hardware events
+driver.start()
 
-# def run():
-#     """This is is where we orchestrate the producer/consumer pattern."""
-    
-#     # Use a set of Queue objects to interact with a
-#     # background thread that owns HID communication.
-#     # msgqTx = messages to the HID thread
-#     # msgqRx = messages from the HID thread 
-    # msgqRx, msgqTx = (Queue(), Queue())
-    
+try:
 
-#     thread = threading.Thread(target=producer, args=(q,), daemon=True, name="Driver")
-#     thread.start()
-#     doMainLoop(q)
+    while True:
+        event = driver.getEvent()
+        if event is not None:
+            log.info(f"event: {event}")
 
-    
-# def doMainLoop(queue: Queue):
-    
-#     # Main thread: consume messages
-#     try:
-#         while True:
-#             message = queue.get(timeout=2)
-#             if message is not None:
-#                 print("Message received")
-#                 time.sleep(1)
-
-#     except KeyboardInterrupt:
-#         print("Shutting down...")
-
-
-# def producer(queue: Queue):
-#     """This function runs on a background thread, producing messages."""
-#     print(f"[{threading.current_thread().name}] started")
-#     while True:
-#         print(f"[{threading.current_thread().name}] Message going into queue")
-#         queue.put("Message produced")
-#         time.sleep(2)
-
-
-
-
-if __name__ == "__main__":
-    run()
+except KeyboardInterrupt:
+    log.info("Stopping...")
