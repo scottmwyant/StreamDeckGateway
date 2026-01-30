@@ -2,6 +2,10 @@
 
 This is a home automation / IoT project that involves a Raspberry Pi and a Stream Deck.
 
+## Next steps
+
+The next step of the project is to mature the `main` and `driver` modules so the app disconnects from the Stream Deck cleanly on shutdown.
+
 ## Raspberry Pi
 
 Details on the compute hardware we'll be using:
@@ -28,11 +32,9 @@ An overview of the software used at runtime.
 
 ### pyhidapi
 
-This is a tiny python library that wraps the HIDAPI which is written in C.  Note the name of the GitHub project is `pyhidapi` and the package is listed on pypi.org under a different name, simply `hid`.
+The library we're using for HID is known as [pyhidapi](https://github.com/apmorton/pyhidapi) on GitHub and available on the Python Package Index under the name [hid](https://pypi.org/project/hid/).  This is a tiny python library that wraps the HIDAPI library which is written in C.
 
-The OS we're using won't allow you to install python modules globally without a few extra hoops and suggests that you install global package using `sudo apt install -y python3-hid`.  Unfortunately, this is a valid command but it installs another library entirely (https://github.com/trezor/cython-hidapi).
-
-- https://github.com/apmorton/pyhidapi
+The OS we're using won't allow you to install python modules globally without a few extra hoops and suggests that you install global package using `sudo apt install -y python3-hid`.  Unfortunately, this is a valid command but it installs another library entirely (https://github.com/trezor/cython-hidapi), so that's not a valid installation.  This friction is removed by bringing the `pyhidapi` repo in as a submodule.
 
 ### hidapi
 
@@ -53,14 +55,19 @@ There are 3 core responsibilities:
 2. Egress - Interact with the network side (assume MQTT).
 3. Orchestration of the other two components, this will be the main thread of the app.
 
-We will use the producer/consumer pattern extensively.  The main thread will instantiate two queues, one for messages sent to the HID thread, one for receiving messages from the HID thread.  We'll think of these objects from the perspective of the main thread:
+### The `main` module
 
-- `rx` => HID thread puts messages in here, the main thread pulls them out.
-- `tx` => main thread puts messages here, HID thread pulls them out
+This is where we orchestrate things between the ingress and egress, manage configuration, logging, etc.
 
-### HID Input Reports
 
-The primary way python will interact with the StreamDeck is via HID Input reports.  These are binary blobs of data that are sent from the device to the host to report hardware state.
+
+### The `driver` module
+
+The module is where we manage the handle to the device and all HID communications.  Instantiating the `Driver` class opens the device by referencing known Vendor and Product IDs.  All HID communication runs on a background thread but this is intentionally hidden from the main thread.  The public API on the Driver includes convienence methods to send control messages to the Stream Deck and `Driver.start()`, `Driver.stop()` methods to control when we're listening for hardware input.
+
+#### HID Input Reports
+
+The way we interact with the Stream Deck is via HID Input reports.  These are binary chunks of data that are sent from the device to the host to report hardware state.  The manufacturer, Elgato, publishes detailed documentation on their custom HID protocol.
 
 There is only 1 input report, it's always going to be 512-bytes long and the first 4 bytes are a header.
 
