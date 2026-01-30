@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 import logging
 import threading
 import time
@@ -64,9 +63,6 @@ class EventType(Enum):
 
 class Driver():
 
-    VID = 0x0fd9
-    PID = 0x0080
-
     def __init__(self):
         """Start a background thread that will manage the hardware connection."""
         self._doHid = False
@@ -77,13 +73,14 @@ class Driver():
         #
         self._rx = Queue()
         self._tx = Queue()
-        thread = threading.Thread(
-            target=self._hidLoop,
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(
+            target=self._worker_loop,
             args=(self._rx, self._tx),
-            daemon=True,
+            daemon=False,
             name="Driver"
         )
-        thread.start()
+        self._thread.start()
 
         #
         # When the background thread starts, device info object is put into the
@@ -101,7 +98,24 @@ class Driver():
         self._doHid = True
 
     def stop(self):
+        """Request the HID thread to stop and wait for it to exit."""
         self._doHid = False
+        self._stop_event.set()
+        # Unblock the thread if it's waiting on the command queue
+        try:
+            self._tx.put(None, block=False)
+        except Exception:
+            pass
+        finally:
+            time.sleep(0.05)
+
+        # Wait briefly for the thread to exit
+        try:
+            self._thread.join(timeout=2.0)
+            if self._thread.is_alive():
+                log.warning("HID thread did not exit cleanly!")
+        except Exception:
+            log.warning("HID thread did not exit cleanly!")
 
     def getEvent(self) -> Tuple[Any] | None:
         try:
@@ -248,9 +262,11 @@ class Driver():
     #   H I D    T H R E A D
     # =========================================================================
         
-    def _hidLoop(self, rx: Queue, tx: Queue) -> None:
+    def _worker_loop(self, rx: Queue, tx: Queue) -> None:
         """This function runs on a background thread, watching for messages on rx,
         putting messages into tx."""
+        
+        VID, PID = (0x0fd9, 0x0080)
 
         #
         # These are intentionally flipped. The method signature is designed to
@@ -265,8 +281,8 @@ class Driver():
         _tx = rx
         
         model = Streamdeck()
-        
-        with Device(self.VID, self.PID) as dev: 
+
+        with Device(VID, PID) as dev: 
             
             # First message goes into the queue
             _tx.put({
@@ -282,12 +298,14 @@ class Driver():
             # Watch for events coming in from the main thread then watch HID.
             # Block on the HID read to maximize responsiveness on that end.
             #
-            while True:
+            while self._stop_event.is_set():
                 try:
                     ms = 50 if self._doHid else 500
                     cmd = _rx.get(timeout=(ms/1000))
 
-                    if isinstance(cmd, GetFeatureReport):
+                    if cmd is None:
+                        break
+                    elif isinstance(cmd, GetFeatureReport):
                         res = dev.get_feature_report(cmd.reportId, 32)
                         cmd.future.set_result(res)
                 
@@ -300,13 +318,18 @@ class Driver():
 
                 except Empty:
                     pass
-                
+
+                if self._stop_event.is_set():
+                    break
+
                 if self._doHid:
                     rawReport: bytes = dev.read(size=512, timeout=50)
                     if len(rawReport):
                         newState = model.handle_hid_input_report(rawReport)
                         if newState:
                             _tx.put(newState, block=False)
+            # falling out of with-device will close the HID handle
+            log.debug("HID thread exiting, device closed")
 
 class InputReport:
     """Represents a parsed HID input report."""
@@ -591,3 +614,5 @@ class Streamdeck:
         """Stub: repaint the button at the given index to reflect the given state.
         """
         pass
+
+__all__ = ["Driver"]
