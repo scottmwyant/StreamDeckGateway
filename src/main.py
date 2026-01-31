@@ -21,24 +21,32 @@ from gateway import Gateway
 log = logging.getLogger(__name__)
 log.info("--- Stream Deck Gateway ---")
 
-#  Instantiate the driver
+# Instantiate the driver
 driver = Driver()
 log.info(f"{driver.deviceInfo['manufacturer']} {driver.deviceInfo['product']} {driver.deviceInfo['serial']}")
 
-# Instantiate the Gateway
+# Instantiate the gateway
 gw = Gateway(topic=f"streamdeck/{driver.deviceInfo['serial']}")
 
-# Begin listening for  hardware events
+# Listen for hardware events
 driver.start()
 
+# Stitch the driver and gateway together
 try:
 
     while True:
         event = driver.getEvent()
         if event is not None:
             log.info(f"event: {event}")
-            future: Future[Tuple[int, str]] = gw.publish({"keyState": event})
-            rc, mid = future.result(timeout=2.0)
+            future: Future[Tuple[int, int]] = gw.publish({"keyState": event})
+            try:
+                rc, mid = future.result(timeout=2.0)
+            except TimeoutError:
+                rc = None
+            if rc == 0: # < Need to know the appropriate response code
+                driver.signalMessageSuccess()
+            else:
+                driver.signalMessageFailure()
 
 except KeyboardInterrupt:
     log.info("Stopping...")

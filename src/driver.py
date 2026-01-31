@@ -65,7 +65,7 @@ class Driver():
 
     def __init__(self):
         """Start a background thread that will manage the hardware connection."""
-        self._doHid = False
+        self._doGetHidInputReport = False
         #
         # Start the background thread now so the public API is ready.
         # We won't start polling the device for input reports until the main
@@ -91,30 +91,22 @@ class Driver():
         self.deviceInfo: Dict = self.getUnitInformation()
         keys = ("manufacturer", "product", "serial")
         self.deviceInfo.update({k: device[k] for k in keys})
-        BUTTON_COUNT = self.deviceInfo["keypadRows"] * self.deviceInfo["keypadColumns"]
-        log.debug(f"Updated button count: {BUTTON_COUNT}")
+        # BUTTON_COUNT = self.deviceInfo["keypadRows"] * self.deviceInfo["keypadColumns"]
 
     def start(self):
-        self._doHid = True
+        self._doGetHidInputReport = True
 
     def stop(self):
-        """Request the HID thread to stop and wait for it to exit."""
-        self._doHid = False
-        self._stop_event.set()
-        # Unblock the thread if it's waiting on the command queue
-        try:
-            self._tx.put(None, block=False)
-        except Exception:
-            pass
-        finally:
-            time.sleep(0.05)
+        """Stop listening for HID input reports.  The HID handle remains open
+        and the worker thread will still process commnads."""
+        self._doGetHidInputReport = False
 
-        # Wait briefly for the thread to exit
-        try:
-            self._thread.join(timeout=2.0)
-            if self._thread.is_alive():
-                log.warning("HID thread did not exit cleanly!")
-        except Exception:
+    def close(self):
+        """Use for clean shutdown.  Signal the worker thread to stop and
+        release resources."""
+        self._stop_event.set()
+        self._thread.join(timeout=2.0)
+        if self._thread.is_alive():
             log.warning("HID thread did not exit cleanly!")
 
     def getEvent(self) -> Tuple[Any] | None:
@@ -122,6 +114,25 @@ class Driver():
             return self._rx.get(timeout=0.2)
         except Empty:
             return None
+
+    def signalMessageSuccess(self):
+        """Put a message into the queue that the HID worker thread watches"""
+        btn = BUTTON_COUNT - 1
+        self.fillKeyWithColor(btn, "#00ff00")
+        time.sleep(0.5)
+        self.fillKeyWithColor(btn, "#000000")
+
+    def signalMessageFailure(self):
+        """Put a message into the queue that the HID worker thread watches"""
+        btn = BUTTON_COUNT - 1
+        self.fillKeyWithColor(btn, "#ff0000")
+        time.sleep(0.5)
+        self.fillKeyWithColor(btn, "#000000")
+        time.sleep(0.5)
+        self.fillKeyWithColor(btn, "#ff0000")
+        time.sleep(0.5)
+        self.fillKeyWithColor(btn, "#000000")
+
 
     #
     # =========================================================================
@@ -234,7 +245,7 @@ class Driver():
         self._tx.put(rpt, block=False)
         return rpt.future.result(timeout=5)
     
-    def _validateColor(self, rgb: Tuple[int] | str | bytes) -> bytes:
+    def _validateColor(self, rgb: Tuple[int, int, int] | str | bytes) -> bytes:
         
         value = None
         if isinstance(rgb, tuple) and \
@@ -279,57 +290,59 @@ class Driver():
         #
         _rx = tx
         _tx = rx
-        
-        model = Streamdeck()
 
+        #
+        # Don't need to bother enumerating hardware attached to the system
+        # since this project is tailored to one specific model.  We will
+        # hardcode the VENDOR and PRODUCT ids.
+        #
         with Device(VID, PID) as dev: 
             
             # First message goes into the queue
             _tx.put({
-                    "manufacturer": dev.manufacturer,
-                    "product": dev.product,
-                    "serial": dev.serial
-                },
-                block=False,
-                timeout=0.5
-            )
+                "manufacturer": dev.manufacturer,
+                "product": dev.product,
+                "serial": dev.serial
+            })
+
+            model = Streamdeck()
 
             #
             # Watch for events coming in from the main thread then watch HID.
             # Block on the HID read to maximize responsiveness on that end.
             #
-            while self._stop_event.is_set():
+            while not self._stop_event.is_set():
+
+                # Check for commands coming in from the main thread
                 try:
-                    ms = 50 if self._doHid else 500
+                    ms = 50 if self._doGetHidInputReport else 500
                     cmd = _rx.get(timeout=(ms/1000))
-
-                    if cmd is None:
-                        break
-                    elif isinstance(cmd, GetFeatureReport):
-                        res = dev.get_feature_report(cmd.reportId, 32)
-                        cmd.future.set_result(res)
-                
-                    elif isinstance(cmd, SetFeatureReport):
-                        res = dev.set_feature_report(cmd.raw)
-                        cmd.future.set_result(res)
-                    
-                    elif isinstance(cmd, OutputReport):
-                        pass
-
                 except Empty:
                     pass
 
-                if self._stop_event.is_set():
-                    break
+                # Forward the command to the hardware, use the runtime type
+                # to know which method to call on the device instance. 
+                if isinstance(cmd, GetFeatureReport):
+                    res = dev.get_feature_report(cmd.reportId, 32)
+                    cmd.future.set_result(res)
+            
+                elif isinstance(cmd, SetFeatureReport):
+                    res = dev.set_feature_report(cmd.raw)
+                    cmd.future.set_result(res)
+                
+                elif isinstance(cmd, OutputReport):
+                    pass
 
-                if self._doHid:
+                if self._doGetHidInputReport:
                     rawReport: bytes = dev.read(size=512, timeout=50)
                     if len(rawReport):
                         newState = model.handle_hid_input_report(rawReport)
                         if newState:
                             _tx.put(newState, block=False)
-            # falling out of with-device will close the HID handle
-            log.debug("HID thread exiting, device closed")
+            
+        # Exiting the 'with' block closes the HID handle
+        log.debug("HID thread exiting, device closed")
+        return # <= End the thread
 
 class InputReport:
     """Represents a parsed HID input report."""
