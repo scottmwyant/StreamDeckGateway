@@ -1,143 +1,98 @@
-import json
 import logging
-import threading
-import time
+import ssl
+import paho.mqtt.client
+import paho.mqtt.enums
 
-from concurrent.futures import Future
 from dataclasses import dataclass
-from queue import Queue, Empty
 from typing import Any, Dict, Optional
 
-import paho.mqtt.client as paho
-# import paho.mqtt
-
 log = logging.getLogger(__name__)
+paholog = logging.getLogger(f"{__name__}.paho")
 
 @dataclass
-class PublishRequest:
-    payload: Dict[str, Any]
-    future: Future
+class MqttClientConfig:
+    host: str = "localhost"
+    port: int = 1883
+    topic: str = "streamdeck/{{serial}}"
+    tls_client: bool = False
+    username: str | None = None
+    password: str | None = None
+    clientId: str | None = None
+    qos: int = 0
 
 class Gateway:
 
-    def __init__(self, host: str = "localhost", port: int = 1883, topic: str = "streamdeck/events", qos: int = 0):
-        self.host = host
-        self.port = port
-        self.defaultTopic = topic
-        self.qos = qos
+    def __init__(self, mqttConfig: MqttClientConfig):
 
-        self._rx: Queue = Queue()
-        self._tx: Queue = Queue()
-        self._stop_event = threading.Event()
-        self._thread = threading.Thread(target=self._worker_loop, name="Gateway", daemon=False)
-
-        # Start thread immediately so API is ready (mirrors HID driver behavior)
-        self._thread.start()
+        client = paho.mqtt.client.Client(
+            callback_api_version=paho.mqtt.enums.CallbackAPIVersion.VERSION2,
+            client_id=mqttConfig.clientId,
+            protocol=paho.mqtt.client.MQTTv311
+        )
+        if mqttConfig.tls_client:
+            client.tls_set(
+                cert_reqs=ssl.CERT_REQUIRED,
+                tls_version=ssl.PROTOCOL_TLS_CLIENT
+            )
+        if mqttConfig.username is not None and mqttConfig.password is not None:
+            client.username_pw_set(mqttConfig.username, mqttConfig.password)
+    
+        client.on_connect = self._on_connect
+        client.on_connect_fail = self._on_connect_fail
+        client.on_disconnect = self._on_disconnect
+        client.on_log = self._on_log
+        client.on_publish = self._on_publish
+        
+        self._config = mqttConfig
+        self._client = client
 
     def start(self) -> None:
-        # kept for API symmetry with Driver; thread already started in ctor
-        return None
+        self._client.connect(self._config.host, self._config.port)
+        self._client.loop_start()
 
     def stop(self) -> None:
         """Request thread shutdown and wait for it to exit."""
-        self._stop_event.set()
-        
-        #
-        # Assume the other thread is blocking on the message queue, unblock it
-        # to signal shutdown is coming.
-        #
+        self._client.disconnect()
+        self._client.loop_stop()
+         
+    def publish(self, payload: str) -> bool:
+        info = self._client.publish(
+            topic=self._config.topic,
+            payload=payload,
+            qos=self._config.qos,
+            retain=False
+        )
+        success = True
         try:
-            self._tx.put(None, block=False)  # type: ignore[arg-type]
-        except Exception:
-            pass
-        finally:
-            time.sleep(0.05)
-
-        try:
-            self._thread.join(timeout=2.0)
-            if self._thread.is_alive():
-                log.warning("MQTT thread did not exit cleanly!")
-        except Exception:
-            log.warning("MQTT thread did not exit cleanly!")
-            
-    def publish(self, payload: Dict[str, Any]) -> Future:
-        """Queue a payload to be published. Returns a Future for the publish result.
-        The future resolves to a tuple `(rc, mid)` on success or raises an exception.
-        """
-        future: Future = Future()
-        req = PublishRequest(payload, future)
-        try:
-            self._tx.put(req, block=False)
-        except Exception as e:
-            future.set_exception(e)
-        return future
+            info.wait_for_publish(timeout=1.2)
+        except:
+            success = False
+        return success
 
     # =========================================================================
     #   P R I V A T E
     # =========================================================================
 
-    def _on_connect(self, client, userdata, flags, rc):
-        if rc == 0:
-            log.info("MQTT connected to %s:%d", self.host, self.port)
-        else:
-            log.warning("MQTT connect returned rc=%s", rc)
+    def _on_connect(self, client, userdata, flags, rc, properties):
+        log.info(f"on_connect: rc={rc}")
 
-    # =========================================================================
-    #   M Q T T    T H R E A D
-    # =========================================================================
+    def _on_connect_fail(self, client, userdata):
+        log.info(f"on_connect_fail")
 
-    def _worker_loop(self) -> None:
-        """Background loop: connect MQTT, then consume publish requests from queue."""
-        client = paho.Client()
-        client.on_connect = self._on_connect
+    def _on_publish(self, client, userdata, mid, rc, properties):
+        log.info(f"on_publish: rc={rc}")
 
-        try:
-            client.connect(self.host, self.port, keepalive=60)
-        except Exception as e:
-            log.exception("Failed to connect to MQTT broker: %s", e)
+    def _on_disconnect(self, client, userdata, flags, rc, properties):
+        log.info(f"on_disconnect: rc={rc}")
 
-        while not self._stop_event.is_set():
-            
-            # Run the network loop
-            try:
-                client.loop(timeout=0.05)
-            except Exception as e:
-                log.error("Exception in paho-mqtt loop", exc_info=e)
+    def _on_log(self, client, userdata, level, buf):
+        level_map = {
+            0x01: logging.INFO,
+            0x02: logging.INFO,
+            0x04: logging.WARNING,
+            0x08: logging.ERROR,
+            0x10: logging.DEBUG
+        }
+        paholog.log(level_map[level], buf)
 
-            # Watch for messages from the main thread
-            try:
-                req = self._tx.get(block=False)
-            except Empty:
-                continue
-
-            if isinstance(req, PublishRequest):
-                
-                # Serialize the payload
-                try:
-                    payload_str = json.dumps(req.payload)
-                except Exception as e:
-                    req.future.set_exception(e)
-                    continue
-                
-                # Queue the message for publishing
-                try:
-                    info = client.publish(self.defaultTopic, payload_str, qos=self.qos)
-                    req.future.set_result((getattr(info, "rc", None), getattr(info, "mid", None)))
-                except Exception as e:
-                    req.future.set_exception(e)
-
-
-        try:
-            if client:
-                # Request disconnect and run the loop once to let paho process it
-                client.disconnect()
-                try:
-                    client.loop(timeout=0.05)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-        log.debug("MQTT gateway loop exiting")
-
-__all__ = ["Gateway"]
+__all__ = ["Gateway", "MqttClientConfig"]
