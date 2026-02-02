@@ -1,0 +1,7 @@
+[submodule "src/pyhidapi"]
+	path = src/pyhidapi
+	url = https://github.com/apmorton/pyhidapi
+[submodule "paho"]
+	path = src/paho
+	url = https://github.com/eclipse-paho/paho.mqtt.python
+	branch = master

@@ -1,42 +1,18 @@
 import logging
-import threading
 import time
 
-from concurrent.futures import Future
 from dataclasses import dataclass
 from enum import Enum
 from pyhidapi.hid import Device
-from queue import Queue, Empty
 from typing import List, Dict, Tuple, Optional, Any
 
 log = logging.getLogger(__name__)
-
-BUTTON_COUNT = 15
 
 @dataclass
 class Button:
     state: int = 0
     timestamp: int = 0
     position: int = 0
-
-@dataclass
-class DeviceInfoReport:
-    future: Future
-
-@dataclass
-class SetFeatureReport:
-    raw: bytes
-    future: Future
-
-@dataclass
-class GetFeatureReport:
-    reportId: int
-    future: Future
-
-@dataclass
-class OutputReport:
-    raw: bytes
-    future: Future
 
 @dataclass
 class ChangeDetail:
@@ -61,78 +37,187 @@ class EventType(Enum):
     NO_CHANGE = 4
     UNKNOWN=5
 
-class Driver():
+    # # =========================================================================
+    # #   H I D    T H R E A D
+    # # =========================================================================
+        
+    # def _worker_loop(self, rx: Queue, tx: Queue) -> None:
+    #     """This function runs on a background thread, watching for messages on rx,
+    #     putting messages into tx."""
+        
+    #     VID, PID = (0x0fd9, 0x0080)
 
-    def __init__(self):
-        """Start a background thread that will manage the hardware connection."""
-        self._doGetHidInputReport = False
-        #
-        # Start the background thread now so the public API is ready.
-        # We won't start polling the device for input reports until the main
-        # thread calls .start(), but we're in position to apply a configuration
-        #
-        self._rx = Queue()
-        self._tx = Queue()
-        self._stop_event = threading.Event()
-        self._thread = threading.Thread(
-            target=self._worker_loop,
-            args=(self._rx, self._tx),
-            daemon=False,
-            name="Driver"
-        )
-        self._thread.start()
+    #     #
+    #     # These are intentionally flipped. The method signature is designed to
+    #     # match the caller's perspective. The first argument passed by the
+    #     # caller is the Queue that it will use to RECEIVE data, the second
+    #     # argument is the Queue it will TRANSMIT data.
+    #     #
+    #     # For sanity, the assignments are flipped so in this method
+    #     # we can use _tx.put() and _rx.get().
+    #     #
+    #     _rx = tx
+    #     _tx = rx
 
-        #
-        # When the background thread starts, device info object is put into the
-        # queue, it's immidiately pulled out and merged with the result from
-        # 'getUnitInformation'.
-        #
-        device = self._rx.get(timeout=0.5)
-        self.deviceInfo: Dict = self.getUnitInformation()
-        keys = ("manufacturer", "product", "serial")
-        self.deviceInfo.update({k: device[k] for k in keys})
-        # BUTTON_COUNT = self.deviceInfo["keypadRows"] * self.deviceInfo["keypadColumns"]
+    #     #
+    #     # Don't need to bother enumerating hardware attached to the system
+    #     # since this project is tailored to one specific model.  We will
+    #     # hardcode the VENDOR and PRODUCT ids.
+    #     #
+    #     with Device(VID, PID) as dev: 
+            
+    #         # First message goes into the queue
+    #         _tx.put({
+    #             "manufacturer": dev.manufacturer,
+    #             "product": dev.product,
+    #             "serial": dev.serial
+    #         })
 
-    def start(self):
-        self._doGetHidInputReport = True
+    #         model = Streamdeck()
 
-    def stop(self):
-        """Stop listening for HID input reports.  The HID handle remains open
-        and the worker thread will still process commnads."""
-        self._doGetHidInputReport = False
+    #         #
+    #         # Watch for events coming in from the main thread then watch HID.
+    #         # Block on the HID read to maximize responsiveness on that end.
+    #         #
+    #         while not self._stop_event.is_set():
+
+    #             # Check for commands coming in from the main thread
+    #             try:
+    #                 ms = 50 if self._doGetHidInputReport else 500
+    #                 cmd = _rx.get(timeout=(ms/1000))
+    #             except Empty:
+    #                 pass
+
+    #             # Forward the command to the hardware, use the runtime type
+    #             # to know which method to call on the device instance. 
+    #             if isinstance(cmd, GetFeatureReport):
+    #                 res = dev.get_feature_report(cmd.reportId, 32)
+    #                 cmd.future.set_result(res)
+            
+    #             elif isinstance(cmd, SetFeatureReport):
+    #                 res = dev.send_feature_report(cmd.raw)
+    #                 cmd.future.set_result(res)
+                
+    #             elif isinstance(cmd, OutputReport):
+    #                 pass
+
+    #             if self._doGetHidInputReport:
+    #                 rawReport: bytes = dev.read(size=512, timeout=50)
+    #                 if len(rawReport):
+    #                     newState = model.handle_hid_input_report(rawReport)
+    #                     if newState:
+    #                         _tx.put(newState, block=False)
+            
+    #     # Exiting the 'with' block closes the HID handle
+    #     log.debug("HID thread exiting, device closed")
+    #     return # <= End the thread
+
+class InputReport:
+    """Represents a parsed HID input report."""
+
+    def __init__(self, report: bytes | None = None):
+        """Parse a 512-byte HID report into an InputReport instance."""
+        self.timestamp = int(time.time() * 1000)
+        
+        if report is None:
+            report = bytes([0x01, 0x00, 0x0f, 0x00] + ([0x00] * 508))
+            
+        if not (isinstance(report, (bytes, bytearray)) and len(report) == 512):
+            raise ValueError("report must be exactly 512 bytes")
+        
+        self.id = report[0]
+        self.command = report[1]
+        length = int.from_bytes(report[2:4], "little")
+        self.buttonCount = length
+        self._report = report[0:4+length]
+        # Build bit-packed integer where LSB = button 0
+        payload = report[4:4 + length]
+        self.value = 0
+        for i, byteValue in enumerate(payload):
+            self.value |= int(bool(byteValue)) << i
+        self.countDown = self.value.bit_count()
+        self.countUp = length - self.countDown
+
+        # Attributes to be set externally after comparison to previous report
+        self.changeMask: int | None = None
+        self.changeCount: int | None = None
+        self.eventType: int | None = None
+
+    def hasButtonChanged(self, index: int) -> bool:
+        """Check if a button has changed state since the previous report."""
+        if self.changeMask is None:
+            raise ValueError("changeMask is not set")
+        if not 0 <= index < self.buttonCount:
+            raise IndexError(f"index must be in range 0..{self.buttonCount-1}")
+        return bool((self.changeMask >> index) & 1)
+
+    def isButtonDown(self, index: int) -> bool:
+        """Check if a button is currently down."""
+        if not 0 <= index < self.buttonCount:
+            raise ValueError(f"index must be in range 0..{self.buttonCount-1}")
+        return bool((self.value >> index) & 1)
+
+class Streamdeck:
+
+    def __init__(self, vid: int = 0x0fd9, pid: int = 0x0080) -> None:
+        self._vid = vid
+        self._pid = pid
+        self._device = Device(self._vid, self._pid)
+        deviceInfo = self.getUnitInformation()
+        self.buttonCount = deviceInfo["keypadRows"] * deviceInfo["keypadColumns"]
+
+        # Initialize with a report indicating all buttons up
+        self._buffer = [InputReport()]
+        self._value = 0
+        # Initialize a logical model, all switches off
+        self._model = [Button() for _ in range(self.buttonCount)]
 
     def close(self):
-        """Use for clean shutdown.  Signal the worker thread to stop and
-        release resources."""
-        self._stop_event.set()
-        self._thread.join(timeout=2.0)
-        if self._thread.is_alive():
-            log.warning("HID thread did not exit cleanly!")
+        self.showLogo()
+        self._device.close()
 
-    def getEvent(self) -> Tuple[Any] | None:
-        try:
-            return self._rx.get(timeout=0.2)
-        except Empty:
-            return None
+    def listen(self, timeout_ms: int) -> Dict[str, Any]:
+        reportBytes = self._readInputReport(timeout_ms)
+        if reportBytes:
+            report = InputReport(reportBytes)
+            hwEvent = self._computeChanges(report)
+            newKeyState = self._updateModel(hwEvent)
+            # Need to check here if self.buttonCount-1 has a value of 2
+            # as that is used to exit
+            if self._model[self.buttonCount-1].state == 2:
+                return {"exit": True}
+            return {"value": newKeyState} if newKeyState else dict()
+            
+        return dict()
 
+    @property
+    def serial(self) -> str:
+        return self._getDeviceProp("serial")
+    
+    @property
+    def manufacturer(self) -> str:
+        return self._getDeviceProp("manufacturer")
+    
+    @property
+    def product(self) -> str:
+        return self._getDeviceProp("product")
+    
     def signalMessageSuccess(self):
         """Put a message into the queue that the HID worker thread watches"""
-        btn = BUTTON_COUNT - 1
+        btn = self.buttonCount - 1
         self.fillKeyWithColor(btn, "#00ff00")
-        time.sleep(0.5)
+        time.sleep(0.15)
         self.fillKeyWithColor(btn, "#000000")
 
     def signalMessageFailure(self):
         """Put a message into the queue that the HID worker thread watches"""
-        btn = BUTTON_COUNT - 1
-        self.fillKeyWithColor(btn, "#ff0000")
-        time.sleep(0.5)
-        self.fillKeyWithColor(btn, "#000000")
-        time.sleep(0.5)
-        self.fillKeyWithColor(btn, "#ff0000")
-        time.sleep(0.5)
-        self.fillKeyWithColor(btn, "#000000")
-
+        btn = self.buttonCount - 1
+        blink = 3
+        for i in range(blink):
+            self.fillKeyWithColor(btn, "#ff0000")
+            time.sleep(0.3)
+            self.fillKeyWithColor(btn, "#000000")
+            time.sleep(0.3)
 
     #
     # =========================================================================
@@ -182,7 +267,7 @@ class Driver():
         report[0:2] = (0x03, 0x02)
         return self._sendFeatureReport(report)
 
-    def fillLcdWithColor(self, rgb: Tuple[int] | str | bytes):
+    def fillLcdWithColor(self, rgb: Tuple[int, int, int] | str | bytes):
         """Fill the entire LCD with a given RGB color."""
         value = self._validateColor(rgb)
         report = bytearray(32)
@@ -190,9 +275,9 @@ class Driver():
         report[2:5] = value
         return self._sendFeatureReport(report)
 
-    def fillKeyWithColor(self, index: int, rgb: Tuple[int] | str | bytes):
+    def fillKeyWithColor(self, index: int, rgb: Tuple[int, int, int] | str | bytes):
         """Fill a single key with a given RGB color."""
-        if not 0 <= index <= (BUTTON_COUNT-1):
+        if not 0 <= index <= (self.buttonCount - 1):
             raise ValueError(f"Invalid button index: {index}")
         value = self._validateColor(rgb)
         report = bytearray(32)
@@ -225,25 +310,21 @@ class Driver():
     # =========================================================================
     #   P R I V A T E
     # =========================================================================
-    
+
     def _getFeatureReport(self, reportId) -> bytes:
-        future: Future[bytes] = Future()
-        report = GetFeatureReport(reportId, future)
-        try:
-            self._tx.put(report, block=False)
-            return future.result(timeout=3)
-        except Empty as e:
-            log.info("Failed to add GetFeatureReport to queue")
-            raise
+        return self._device.get_feature_report(reportId, 32)
 
     def _sendFeatureReport(self, report: bytearray | bytes) -> None:
         if isinstance(report, bytearray):
             report = bytes(report)
+        return self._device.send_feature_report(report)
 
-        future = Future()
-        rpt = SetFeatureReport(report, future)
-        self._tx.put(rpt, block=False)
-        return rpt.future.result(timeout=5)
+    def _writeOutputReport(self, report: bytearray | bytes) -> None:
+        pass
+
+    def _readInputReport(self, timeout_ms: int) -> bytes:
+        # The following returns b'' on timeout.
+        return self._device.read(size=512, timeout=timeout_ms)
     
     def _validateColor(self, rgb: Tuple[int, int, int] | str | bytes) -> bytes:
         
@@ -269,135 +350,9 @@ class Driver():
         
         return value
     
-    # =========================================================================
-    #   H I D    T H R E A D
-    # =========================================================================
-        
-    def _worker_loop(self, rx: Queue, tx: Queue) -> None:
-        """This function runs on a background thread, watching for messages on rx,
-        putting messages into tx."""
-        
-        VID, PID = (0x0fd9, 0x0080)
-
-        #
-        # These are intentionally flipped. The method signature is designed to
-        # match the caller's perspective. The first argument passed by the
-        # caller is the Queue that it will use to RECEIVE data, the second
-        # argument is the Queue it will TRANSMIT data.
-        #
-        # For sanity, the assignments are flipped so in this method
-        # we can use _tx.put() and _rx.get().
-        #
-        _rx = tx
-        _tx = rx
-
-        #
-        # Don't need to bother enumerating hardware attached to the system
-        # since this project is tailored to one specific model.  We will
-        # hardcode the VENDOR and PRODUCT ids.
-        #
-        with Device(VID, PID) as dev: 
-            
-            # First message goes into the queue
-            _tx.put({
-                "manufacturer": dev.manufacturer,
-                "product": dev.product,
-                "serial": dev.serial
-            })
-
-            model = Streamdeck()
-
-            #
-            # Watch for events coming in from the main thread then watch HID.
-            # Block on the HID read to maximize responsiveness on that end.
-            #
-            while not self._stop_event.is_set():
-
-                # Check for commands coming in from the main thread
-                try:
-                    ms = 50 if self._doGetHidInputReport else 500
-                    cmd = _rx.get(timeout=(ms/1000))
-                except Empty:
-                    pass
-
-                # Forward the command to the hardware, use the runtime type
-                # to know which method to call on the device instance. 
-                if isinstance(cmd, GetFeatureReport):
-                    res = dev.get_feature_report(cmd.reportId, 32)
-                    cmd.future.set_result(res)
-            
-                elif isinstance(cmd, SetFeatureReport):
-                    res = dev.set_feature_report(cmd.raw)
-                    cmd.future.set_result(res)
-                
-                elif isinstance(cmd, OutputReport):
-                    pass
-
-                if self._doGetHidInputReport:
-                    rawReport: bytes = dev.read(size=512, timeout=50)
-                    if len(rawReport):
-                        newState = model.handle_hid_input_report(rawReport)
-                        if newState:
-                            _tx.put(newState, block=False)
-            
-        # Exiting the 'with' block closes the HID handle
-        log.debug("HID thread exiting, device closed")
-        return # <= End the thread
-
-class InputReport:
-    """Represents a parsed HID input report."""
-
-    def __init__(self, report: bytes | None = None):
-        """Parse a 512-byte HID report into an InputReport instance."""
-        self.timestamp = int(time.time() * 1000)
-        
-        if report is None:
-            report = bytes([0x01, 0x00, 0x0f, 0x00] + ([0x00] * 508))
-            
-        if not (isinstance(report, (bytes, bytearray)) and len(report) == 512):
-            raise ValueError("report must be exactly 512 bytes")
-        
-        self.id = report[0]
-        self.command = report[1]
-        length = int.from_bytes(report[2:4], "little")
-        if length != BUTTON_COUNT:
-            raise ValueError(f"unexpected payload length: {length}")
-        self._report = report[0:4+length]
-        # Build bit-packed integer where LSB = button 0
-        payload = report[4:4 + length]
-        self.value = 0
-        for i, byteValue in enumerate(payload):
-            self.value |= int(bool(byteValue)) << i
-        self.countDown = self.value.bit_count()
-        self.countUp = length - self.countDown
-
-        # Attributes to be set externally after comparison to previous report
-        self.changeMask: int | None = None
-        self.changeCount: int | None = None
-        self.eventType: int | None = None
-
-    def hasButtonChanged(self, index: int) -> bool:
-        """Check if a button has changed state since the previous report."""
-        if self.changeMask is None:
-            raise ValueError("changeMask is not set")
-        if not 0 <= index < BUTTON_COUNT:
-            raise IndexError(f"index must be in range 0..{BUTTON_COUNT-1}")
-        return bool((self.changeMask >> index) & 1)
-
-    def isButtonDown(self, index: int) -> bool:
-        """Check if a button is currently down."""
-        if not 0 <= index < BUTTON_COUNT:
-            raise ValueError(f"index must be in range 0..{BUTTON_COUNT-1}")
-        return bool((self.value >> index) & 1)
-
-class Streamdeck:
-
-    def __init__(self) -> None:
-        # Initialize with a report indicating all buttons up
-        self._buffer = [InputReport()]
-        self._value = 0
-        # Initialize a logical model, all switches off
-        self._model = [Button() for _ in range(BUTTON_COUNT)]
+    def _getDeviceProp(self, name: str) -> str:
+        """Helper method to expose attributes from the pyhidapi Device class"""
+        return getattr(self._device, name)
 
     def _determineEventType(self, report: InputReport) -> int:
         """
@@ -413,7 +368,7 @@ class Streamdeck:
 
         isUp = False
         isDown = False
-        for i in range(BUTTON_COUNT):
+        for i in range(self.buttonCount):
             # check if button state has changed
             if report.hasButtonChanged(i):
                 if report.isButtonDown(i):
@@ -582,7 +537,7 @@ class Streamdeck:
         # , compare to previous reports.
         # May require cyclying back through multiple reports to find the last event
         # for the given button.
-        for i in range(BUTTON_COUNT):
+        for i in range(self.buttonCount):
             if rpt.hasButtonChanged(i):
                 obj = ChangeDetail(i, int(rpt.isButtonDown(i)), None)
                 if not rpt.isButtonDown(i):
@@ -628,4 +583,4 @@ class Streamdeck:
         """
         pass
 
-__all__ = ["Driver"]
+__all__ = ["Streamdeck"]

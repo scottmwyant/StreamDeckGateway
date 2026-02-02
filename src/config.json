@@ -1,7 +1,4 @@
 {
-    "streamdeck": {
-        "longPress_ms": 1000
-    },
     "mqtt": {
         "host": "5c35dccf09a24a34a0f4ec3674557135.s2.eu.hivemq.cloud",
         "port": 8883,
@@ -11,7 +8,7 @@
         "topic": "streamdeck/{{serial}}",
         "clientId": "elgato"
     },
-    "logging.config": {
+    "logging": {
         "version": 1,
         "formatters": {
             "simple": {
