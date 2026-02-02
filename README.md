@@ -2,7 +2,13 @@
 
 This project captures events from a Streamdeck Mk.2 and relays events to an MQTT broker.
 
+## Submodules
 
+This project pulls source for dependencies rather than installing the dependencies with a package manager.
+
+`git submodule add https://github.com/apmorton/pyhidapi`
+
+`git submodules add https://github.com/eclipse-paho/paho.mqtt.python`
 
 ## Install as a service
 
