@@ -3,7 +3,7 @@
 #
 
 $tmp = "streamdeck"      # Staging directory
-$pub = "streamdeck.tar.gz"  # .tar archive file for distribution
+$pub = "streamdeck.tar.gz"  # file for distribution
 
 # Clean artifacts
 if(Test-Path $tmp) {

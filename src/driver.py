@@ -37,81 +37,6 @@ class EventType(Enum):
     NO_CHANGE = 4
     UNKNOWN=5
 
-    # # =========================================================================
-    # #   H I D    T H R E A D
-    # # =========================================================================
-        
-    # def _worker_loop(self, rx: Queue, tx: Queue) -> None:
-    #     """This function runs on a background thread, watching for messages on rx,
-    #     putting messages into tx."""
-        
-    #     VID, PID = (0x0fd9, 0x0080)
-
-    #     #
-    #     # These are intentionally flipped. The method signature is designed to
-    #     # match the caller's perspective. The first argument passed by the
-    #     # caller is the Queue that it will use to RECEIVE data, the second
-    #     # argument is the Queue it will TRANSMIT data.
-    #     #
-    #     # For sanity, the assignments are flipped so in this method
-    #     # we can use _tx.put() and _rx.get().
-    #     #
-    #     _rx = tx
-    #     _tx = rx
-
-    #     #
-    #     # Don't need to bother enumerating hardware attached to the system
-    #     # since this project is tailored to one specific model.  We will
-    #     # hardcode the VENDOR and PRODUCT ids.
-    #     #
-    #     with Device(VID, PID) as dev: 
-            
-    #         # First message goes into the queue
-    #         _tx.put({
-    #             "manufacturer": dev.manufacturer,
-    #             "product": dev.product,
-    #             "serial": dev.serial
-    #         })
-
-    #         model = Streamdeck()
-
-    #         #
-    #         # Watch for events coming in from the main thread then watch HID.
-    #         # Block on the HID read to maximize responsiveness on that end.
-    #         #
-    #         while not self._stop_event.is_set():
-
-    #             # Check for commands coming in from the main thread
-    #             try:
-    #                 ms = 50 if self._doGetHidInputReport else 500
-    #                 cmd = _rx.get(timeout=(ms/1000))
-    #             except Empty:
-    #                 pass
-
-    #             # Forward the command to the hardware, use the runtime type
-    #             # to know which method to call on the device instance. 
-    #             if isinstance(cmd, GetFeatureReport):
-    #                 res = dev.get_feature_report(cmd.reportId, 32)
-    #                 cmd.future.set_result(res)
-            
-    #             elif isinstance(cmd, SetFeatureReport):
-    #                 res = dev.send_feature_report(cmd.raw)
-    #                 cmd.future.set_result(res)
-                
-    #             elif isinstance(cmd, OutputReport):
-    #                 pass
-
-    #             if self._doGetHidInputReport:
-    #                 rawReport: bytes = dev.read(size=512, timeout=50)
-    #                 if len(rawReport):
-    #                     newState = model.handle_hid_input_report(rawReport)
-    #                     if newState:
-    #                         _tx.put(newState, block=False)
-            
-    #     # Exiting the 'with' block closes the HID handle
-    #     log.debug("HID thread exiting, device closed")
-    #     return # <= End the thread
-
 class InputReport:
     """Represents a parsed HID input report."""
 
@@ -145,6 +70,9 @@ class InputReport:
 
     def hasButtonChanged(self, index: int) -> bool:
         """Check if a button has changed state since the previous report."""
+        # This method returns a bit from self.changeMask, meaning that attribute needs to be set
+        # before this method is called.  The value of self.changeMask is not supplied by the
+        # hardware, but is calculated by comparing this input report to another (the most recent) report.
         if self.changeMask is None:
             raise ValueError("changeMask is not set")
         if not 0 <= index < self.buttonCount:
@@ -171,12 +99,19 @@ class Streamdeck:
         self._value = 0
         # Initialize a logical model, all switches off
         self._model = [Button() for _ in range(self.buttonCount)]
-
+        self._publishedInitialState = False
+    
     def close(self):
         self.showLogo()
         self._device.close()
 
     def listen(self, timeout_ms: int) -> Dict[str, Any]:
+        if not self._publishedInitialState:
+            self._publishedInitialState = True
+            return {
+                "value": [x.state for x in self._model]
+            }
+        
         reportBytes = self._readInputReport(timeout_ms)
         if reportBytes:
             report = InputReport(reportBytes)
@@ -185,10 +120,9 @@ class Streamdeck:
             # Need to check here if self.buttonCount-1 has a value of 2
             # as that is used to exit
             if self._model[self.buttonCount-1].state == 2:
-                return {"exit": True}
-            return {"value": newKeyState} if newKeyState else dict()
-            
-        return dict()
+                return {"value": newKeyState, "exit": True}
+            return {"value": newKeyState}
+        return {"value": None}
 
     @property
     def serial(self) -> str:
@@ -395,64 +329,6 @@ class Streamdeck:
             # log.debug(newState)
             return newState
 
-
-    
-    # def _sendEventData_MQTT(self, payload: Dict) -> Tuple[int, str]:
-    #     """Send the event data to MQTT broker.
-        
-    #     Connects to the MQTT broker, publishes the event, and disconnects.
-    #     Since events are infrequent, a new connection is created per event.
-        
-    #     Args:
-    #         payload: Dictionary containing event data to publish
-            
-    #     Returns:
-    #         Tuple of (status_code, message)
-    #     """
-    #     try:
-    #         # MQTT configuration
-    #         broker = "localhost"
-    #         port = 1883
-    #         topic = "streamdeck/events"
-            
-    #         # Create MQTT client and set up callbacks
-    #         client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1)
-            
-    #         def on_connect(client, userdata, flags, rc):
-    #             if rc != 0:
-    #                 raise mqtt.MQTTException(f"Connection failed with code {rc}")
-            
-    #         def on_publish(client, userdata, mid):
-    #             pass
-            
-    #         def on_disconnect(client, userdata, rc):
-    #             pass
-            
-    #         client.on_connect = on_connect
-    #         client.on_publish = on_publish
-    #         client.on_disconnect = on_disconnect
-            
-    #         # Connect to broker
-    #         client.connect(broker, port, keepalive=5)
-            
-    #         # Publish the event data as JSON
-    #         message = json.dumps(payload)
-    #         result = client.publish(topic, message, qos=1)
-            
-    #         # Wait for publish to complete
-    #         client.loop(timeout=1.0)
-            
-    #         # Disconnect
-    #         client.disconnect()
-            
-    #         if result.rc == mqtt.MQTT_ERR_SUCCESS:
-    #             return 200, "Event published successfully"
-    #         else:
-    #             return 400, f"Failed to publish: {mqtt.error_string(result.rc)}"
-                
-    #     except Exception as e:
-    #         return 500, f"MQTT error: {str(e)}"
-
     def _showResult(self, res: str) -> None:
         """Stub: show the result of sending event data.
         """
@@ -461,7 +337,7 @@ class Streamdeck:
 
     def _updateModel(self, hwEvent: HardwareEvent) -> List[int] | None:
         """Update the internal model based on the changes detected
-        in the input report.  Returns event data for further processing.
+        in the input report. Return logical state of the device.
         """
 
         # This is where we translate hardware events to logical events
@@ -477,18 +353,35 @@ class Streamdeck:
         # Next question is what semantics do we send?
         # Maybe send an array of integer values (0,1,2).
 
-        stateChange = False
-        for btn in hwEvent.detail:
-            index = btn.index
-            position = btn.position
-            self._model[index].timestamp = hwEvent.timestamp
-            self._model[index].position = position
+        # By comparing the current InputReport to the last one in the buffer, we have
+        # already identified which buttons have changed state.  Now we will
+        # walk through those changes and update the logical model for the device. 
 
-            if position == 0:
-                stateChange = True
-                level = 1 if (btn.duration_ms if btn.duration_ms is not None else 0) < 1000 else 2
-                self._model[index].state = level if self._model[index].state == 0 else 0
-                self._repaintButton(index, self._model[index].state)
+        # Intent is to filter out hardware events that do not represent a change in
+        # logical state, a KEY_DOWN or a WAKE_UP for example.  In those cases, we
+        # return None to indicate that thereis no change in logical state.
+        #
+        # When we see a KEY_UP or a KEY_UP_DOWN, we focus on the UP event,
+        # which signifies a state change (button was pressed & released) 
+
+        stateChange = False
+        if hwEvent.eventType in [EventType.KEY_UP.value, EventType.KEY_UP_DOWN.value]:
+            for btn in hwEvent.detail:
+                index = btn.index
+                position = btn.position
+                self._model[index].timestamp = hwEvent.timestamp
+                self._model[index].position = position
+
+                if position == 0: # on changes where the button is released
+                    stateChange = True
+                    if self._model[index].state == 0:
+                        # pressLevel: 1=short, 2=long
+                        pressLevel = 1 if (btn.duration_ms if btn.duration_ms is not None else 0) < 1000 else 2
+                        self._model[index].state = pressLevel
+                    else:
+                        self._model[index].state = 0
+                    self._repaintButton(index, self._model[index].state)
+            
         return [x.state for x in self._model] if stateChange else None
 
     def _computeChanges(self, report: InputReport | bytearray | bytes) -> HardwareEvent:
@@ -500,8 +393,8 @@ class Streamdeck:
         else:
             raise TypeError("report must be bytes or InputReport instance")
         
-        # Now that we are sure we have an InputReport, we can set
-        # values for attributes that depend on the previous report
+        # Now that we are sure we have an InputReport, we set values
+        # for attributes that depend on the previous report
         # i.e. the last one in the buffer.
 
         rpt.changeMask = self._buffer[-1].value ^ rpt.value
@@ -533,10 +426,9 @@ class Streamdeck:
         # Iterate over the report payload (each button)
         # Get the profile for the button and call the appropriate handler.
         # 
-        # 
-        # , compare to previous reports.
-        # May require cyclying back through multiple reports to find the last event
-        # for the given button.
+        # Compare to previous reports.
+        # May require cyclying back through multiple
+        # reports to find the last event for the given button.
         for i in range(self.buttonCount):
             if rpt.hasButtonChanged(i):
                 obj = ChangeDetail(i, int(rpt.isButtonDown(i)), None)

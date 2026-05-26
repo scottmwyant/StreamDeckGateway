@@ -59,8 +59,6 @@ There are 3 core responsibilities:
 
 This is where we orchestrate things between the ingress and egress, manage configuration, logging, etc.
 
-
-
 ### The `driver` module
 
 The module is where we manage the handle to the device and all HID communications.  Instantiating the `Driver` class opens the device by referencing known Vendor and Product IDs.  All HID communication runs on a background thread but this is intentionally hidden from the main thread.  The public API on the Driver includes convienence methods to send control messages to the Stream Deck and `Driver.start()`, `Driver.stop()` methods to control when we're listening for hardware input.
