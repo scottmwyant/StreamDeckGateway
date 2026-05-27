@@ -36,8 +36,9 @@ log.debug(f"{asdict(hostInfo)}")
 # Instantiate the producer
 sd = Streamdeck()
 
-# Instantiate the consumer
+# Instantiate the consumer and start it
 sink = MqttClient.MqttClient(cfg["mqtt"], sd.manufacturer, sd.serial)
+sink.start()
 
 #
 # =============================================================================
@@ -58,7 +59,9 @@ while True:
             sd.signalMessageSuccess()
         else:
             sd.signalMessageFailure()
-        
+
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+         
 log.info("Close connection to streamdeck")
 sd.close()
 log.info("Stopping data flow to consumer")
