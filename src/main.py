@@ -55,6 +55,9 @@ while True:
     if "exit" in state:
         shutdown_host = True
     if state.get("value") is not None:
+        state["host"] = asdict(hostInfo)
+        state["host"]["uptime"] = utils._getSystemUptime()
+        state["serial"] = sd.serial
         if sink.publish(state):
             sd.signalMessageSuccess()
         else:

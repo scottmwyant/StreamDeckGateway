@@ -2,6 +2,7 @@ import json
 import socket
 import subprocess
 
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
@@ -12,6 +13,7 @@ class HostInfo:
     prefixlen: int
     phyAddress: Optional[str]
     hostname: str
+    model: str
 
 def _getHostname() -> str:
     return socket.gethostname()
@@ -46,6 +48,13 @@ def _getNetAddress(ifName) -> Dict:
         return (json.loads(result.stdout))[0]
     raise RuntimeError(f"Failed to get network address for interface {ifName}")
 
+def _getHardwareModel() -> str:
+    return  Path("/proc/device-tree/model") \
+            .read_text().rstrip("\x00")
+
+def _getSystemUptime() -> float:
+    return int(float(Path("/proc/uptime").read_text().split()[0]))
+
 def getHostInfo() -> HostInfo:
     names = _getInterfaceNames()
     try:
@@ -55,16 +64,17 @@ def getHostInfo() -> HostInfo:
         pass
     _if = names[0]
     
-    netInfo = _getNetAddress(_if)
-    netInfo["hostname"] = _getHostname()
-    netInfo["netAddress"] = netInfo["addr_info"][0]["local"]
-    netInfo["prefixlen"] = netInfo["addr_info"][0]["prefixlen"]
-    del netInfo["addr_info"]
-    del netInfo["operstate"]
+    info = _getNetAddress(_if)
+    info["hostname"] = _getHostname()
+    info["model"] = _getHardwareModel()
+    info["netAddress"] = info["addr_info"][0]["local"]
+    info["prefixlen"] = info["addr_info"][0]["prefixlen"]
+    del info["addr_info"]
+    del info["operstate"]
     mac = _getPhysicalAddress(_if)
     if mac:
-        netInfo["phyAddress"] = mac
-    return HostInfo(**netInfo)
+        info["phyAddress"] = mac
+    return HostInfo(**info)
     
 def shutdown():
     subprocess.run(["systemctl", "poweroff"])
