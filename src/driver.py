@@ -109,7 +109,7 @@ class Streamdeck:
         if not self._publishedInitialState:
             self._publishedInitialState = True
             return {
-                "value": [x.state for x in self._model]
+                "buttonState": [x.state for x in self._model]
             }
         
         reportBytes = self._readInputReport(timeout_ms)
@@ -120,9 +120,9 @@ class Streamdeck:
             # Need to check here if self.buttonCount-1 has a value of 2
             # as that is used to exit
             if self._model[self.buttonCount-1].state == 2:
-                return {"value": newKeyState, "exit": True}
-            return {"value": newKeyState}
-        return {"value": None}
+                return {"buttonState": newKeyState, "exit": True}
+            return {"buttonState": newKeyState}
+        return {"buttonState": None}
 
     @property
     def serial(self) -> str:

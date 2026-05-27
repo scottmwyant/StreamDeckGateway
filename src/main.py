@@ -54,7 +54,7 @@ while True:
         break
     if "exit" in state:
         shutdown_host = True
-    if state.get("value") is not None:
+    if state.get("buttonState") is not None:
         state["host"] = asdict(hostInfo)
         state["host"]["uptime"] = utils._getSystemUptime()
         state["serial"] = sd.serial
