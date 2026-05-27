@@ -8,7 +8,6 @@ from typing import Dict, List, Optional
 @dataclass
 class HostInfo:
     ifname: str
-    operstate: str
     netAddress: str
     prefixlen: int
     phyAddress: Optional[str]
@@ -37,7 +36,7 @@ def _getPhysicalAddress(ifName) -> Dict | None:
     if result.stdout:
         return (json.loads(result.stdout))[0]["address"]
     
-def _getNetAddress(ifName) -> Dict | None:
+def _getNetAddress(ifName) -> Dict:
     result: subprocess.CompletedProcess = subprocess.run(
         ["ip", "-4", "-br", "-j", "address", "show", ifName],
         capture_output=True,
@@ -45,8 +44,9 @@ def _getNetAddress(ifName) -> Dict | None:
     )
     if result.stdout:
         return (json.loads(result.stdout))[0]
+    raise RuntimeError(f"Failed to get network address for interface {ifName}")
 
-def getHostInfo() -> HostInfo | None:
+def getHostInfo() -> HostInfo:
     names = _getInterfaceNames()
     try:
         i = names.index("lo")
@@ -56,15 +56,15 @@ def getHostInfo() -> HostInfo | None:
     _if = names[0]
     
     netInfo = _getNetAddress(_if)
-    if netInfo:
-        netInfo["hostname"] = _getHostname()
-        netInfo["netAddress"] = netInfo["addr_info"][0]["local"]
-        netInfo["prefixlen"] = netInfo["addr_info"][0]["prefixlen"]
-        del netInfo["addr_info"]
-        mac = _getPhysicalAddress(_if)
-        if mac:
-            netInfo["phyAddress"] = mac
-        return HostInfo(**netInfo)
+    netInfo["hostname"] = _getHostname()
+    netInfo["netAddress"] = netInfo["addr_info"][0]["local"]
+    netInfo["prefixlen"] = netInfo["addr_info"][0]["prefixlen"]
+    del netInfo["addr_info"]
+    del netInfo["operstate"]
+    mac = _getPhysicalAddress(_if)
+    if mac:
+        netInfo["phyAddress"] = mac
+    return HostInfo(**netInfo)
     
 def shutdown():
     subprocess.run(["systemctl", "poweroff"])

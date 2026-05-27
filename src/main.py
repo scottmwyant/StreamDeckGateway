@@ -4,6 +4,7 @@ import logging.config
 import utils
 
 from pathlib import Path
+from dataclasses import asdict
 
 def read_config_file():
     configFile = Path(__file__).resolve().parent / "config.json"
@@ -30,6 +31,7 @@ log.info("--- Streamdeck Gateway ---")
 # Get information that identifies the host
 log.debug("Collecting host info")
 hostInfo = utils.getHostInfo()
+log.debug(f"{asdict(hostInfo)}")
 
 # Instantiate the producer
 sd = Streamdeck()

@@ -85,7 +85,7 @@ class MqttClient:
 
     def start(self) -> None:
         self._client.connect(self._config.host, self._config.port)
-        self._client.loop_start()    
+        self._client.loop_start()
 
     def publish(self, payload: dict) -> bool:
         msgInfo = self._client.publish(self._config.topic, json.dumps(payload))
