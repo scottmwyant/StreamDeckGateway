@@ -46,7 +46,7 @@ def on_log(client, userdata, level, buf):
 
 class MqttClient:
 
-    def __init__(self, config, mfg, sn):
+    def __init__(self, config, mfg, sn, hostInfo):
         
         config = MqttConfig(**config)
 
@@ -54,6 +54,11 @@ class MqttClient:
         # device serial number.  Replace the placeholder with the runtime value.
         config.topic = config.topic.replace("{{serial}}", sn)
         
+        # Constuct a client Id from host info
+        if config.clientId is None:
+            mac = hostInfo["phyAddress"].replace(":", "")
+            config.clientId = f"{hostInfo["hostname"]}_{mac[len(mac)-4:]}"
+
         # Instantiate MQTT client
         client = paho.mqtt.client.Client(
             callback_api_version=paho.mqtt.enums.CallbackAPIVersion.VERSION2,

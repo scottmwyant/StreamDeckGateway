@@ -105,24 +105,36 @@ class Streamdeck:
         self.showLogo()
         self._device.close()
 
-    def listen(self, timeout_ms: int) -> Dict[str, Any]:
+    def listen(self, timeout_ms: int) -> Tuple[List[int] | None, Dict[str, Any] | None]:
+        # Returns a two-element tuple.  Each element is either a dictionary or None.
+        # The first element is logical button state, which is only returned when there is a change. 
+        # The second element is a command, which is used to send a signal to the host (e.g. to shutdown).
+        cmd = None
+
+        # On the first call, we publish initial state of the device without even checking for input
+        # reports.  This may cause the upper level system to get a duplicate message if the service
+        # restarts.
         if not self._publishedInitialState:
             self._publishedInitialState = True
-            return {
-                "buttonState": [x.state for x in self._model]
-            }
+            return ([x.state for x in self._model], cmd)
         
         reportBytes = self._readInputReport(timeout_ms)
-        if reportBytes:
-            report = InputReport(reportBytes)
-            hwEvent = self._computeChanges(report)
-            newKeyState = self._updateModel(hwEvent)
-            # Need to check here if self.buttonCount-1 has a value of 2
-            # as that is used to exit
-            if self._model[self.buttonCount-1].state == 2:
-                return {"buttonState": newKeyState, "exit": True}
-            return {"buttonState": newKeyState}
-        return {"buttonState": None}
+        if len(reportBytes) == 0:
+            return (None, cmd)
+        report = InputReport(reportBytes)
+        hwEvent = self._computeChanges(report)
+        newKeyState = self._updateModel(hwEvent)
+        
+        # Need to check here if self.buttonCount-1 has a value of 2
+        # which is interpreted as a command to shutdown the host.
+        if self._model[self.buttonCount-1].state == 2:
+            cmd = {"exit": True}
+            
+        return (newKeyState, cmd)
+
+    @property
+    def vid_pid(self) -> Tuple[int, int]:
+        return (self._vid, self._pid)
 
     @property
     def serial(self) -> str:
@@ -321,13 +333,13 @@ class Streamdeck:
     
         return EventType.UNKNOWN.value
     
-    def handle_hid_input_report(self, report: bytes) -> List[int] | None:
-        hwEvent = self._computeChanges(report)
-        log.debug(hwEvent)
-        if hwEvent.changeCount > 0:
-            newState = self._updateModel(hwEvent)
-            # log.debug(newState)
-            return newState
+    # def handle_hid_input_report(self, report: bytes) -> List[int] | None:
+    #     hwEvent = self._computeChanges(report)
+    #     log.debug(hwEvent)
+    #     if hwEvent.changeCount > 0:
+    #         newState = self._updateModel(hwEvent)
+    #         # log.debug(newState)
+    #         return newState
 
     def _showResult(self, res: str) -> None:
         """Stub: show the result of sending event data.
@@ -365,7 +377,7 @@ class Streamdeck:
         # which signifies a state change (button was pressed & released) 
 
         stateChange = False
-        if hwEvent.eventType in [EventType.KEY_UP.value, EventType.KEY_UP_DOWN.value]:
+        if hwEvent.eventType <= 2: # KEY_UP, KEY_DOWN, or KEY_UP_DOWN
             for btn in hwEvent.detail:
                 index = btn.index
                 position = btn.position
@@ -455,7 +467,7 @@ class Streamdeck:
                     # That said, we should never be hitting this code path on
                     # a wake up because we're assuming a wake up will look like
                     # no buttons have changed state.
-                    ms =0
+                    ms = 0
                     if self._model[i].timestamp > 0 and (self._model[i].position != obj.position) :
                         ms = rpt.timestamp - self._model[i].timestamp
                     obj.duration_ms = ms

@@ -37,7 +37,7 @@ log.debug(f"{asdict(hostInfo)}")
 sd = Streamdeck()
 
 # Instantiate the consumer and start it
-sink = MqttClient.MqttClient(cfg["mqtt"], sd.manufacturer, sd.serial)
+sink = MqttClient.MqttClient(cfg["mqtt"], sd.manufacturer, sd.serial, asdict(hostInfo))
 sink.start()
 
 #
@@ -49,19 +49,29 @@ sink.start()
 shutdown_host = False
 while True:
     try:
-        state = sd.listen(timeout_ms=60)
+        btnState, cmd = sd.listen(timeout_ms=60)
     except KeyboardInterrupt:
         break
-    if "exit" in state:
-        shutdown_host = True
-    if state.get("buttonState") is not None:
-        state["host"] = asdict(hostInfo)
-        state["host"]["uptime"] = utils._getSystemUptime()
-        state["serial"] = sd.serial
-        if sink.publish(state):
+    if btnState is not None:
+        host = asdict(hostInfo)
+        host["uptime"] = utils._getSystemUptime()
+        vid, pid = sd.vid_pid
+        hid = {
+            "manufacturer": sd.manufacturer,
+            "pid": pid,
+            "product": sd.product,
+            "serial": sd.serial,
+            "state": btnState,
+            "vid": vid
+        }
+        if sink.publish({"host": host, "hid": hid}):
             sd.signalMessageSuccess()
         else:
             sd.signalMessageFailure()
+
+    if cmd is not None and cmd.get("exit", False):
+        shutdown_host = True
+        break
 
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
          
