@@ -3,8 +3,9 @@ import time
 
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 from pyhidapi.hid import Device
-from typing import List, Dict, Tuple, Optional, Any
+from typing import List, Dict, Tuple, Any
 
 log = logging.getLogger(__name__)
 
@@ -167,8 +168,24 @@ class Streamdeck:
 
     #
     # =========================================================================
+    #   Output Reports
+    #   https://docs.elgato.com/streamdeck/hid/stream-deck-classic#output-reports
+    # =========================================================================
+    #
+
+    def updateKeyImage(self, img: bytes, index: int) -> None:
+        return self._write_image(img, 0x07, index)
+
+    def updateFullScreenImage(self, img: bytes) -> None:
+        return self._write_image(img, 0x08, 0)
+
+    def updateBackground(self, img: bytes, index: int = 0) -> None:
+        return self._write_image(img, 0x0d, index)
+
+    #
+    # =========================================================================
     #   Feature Reports - Getters
-    #   https://docs.elgato.com/streamdeck/hid/module-15_32#feature-report---getters
+    #   https://docs.elgato.com/streamdeck/hid/stream-deck-classic/#getter-feature-reports
     # =========================================================================
     #
 
@@ -203,7 +220,7 @@ class Streamdeck:
     #
     # =========================================================================
     #   Feature Reports - Setters
-    #   https://docs.elgato.com/streamdeck/hid/module-15_32#feature-report---setters
+    #   https://docs.elgato.com/streamdeck/hid/stream-deck-classic/#setter-feature-reports
     # =========================================================================
     #
 
@@ -264,9 +281,6 @@ class Streamdeck:
         if isinstance(report, bytearray):
             report = bytes(report)
         return self._device.send_feature_report(report)
-
-    def _writeOutputReport(self, report: bytearray | bytes) -> None:
-        pass
 
     def _readInputReport(self, timeout_ms: int) -> bytes:
         # The following returns b'' on timeout.
@@ -332,20 +346,6 @@ class Streamdeck:
             return EventType.KEY_UP_DOWN.value
     
         return EventType.UNKNOWN.value
-    
-    # def handle_hid_input_report(self, report: bytes) -> List[int] | None:
-    #     hwEvent = self._computeChanges(report)
-    #     log.debug(hwEvent)
-    #     if hwEvent.changeCount > 0:
-    #         newState = self._updateModel(hwEvent)
-    #         # log.debug(newState)
-    #         return newState
-
-    def _showResult(self, res: str) -> None:
-        """Stub: show the result of sending event data.
-        """
-        pass
-        # log.info(f"Result: {res}")
 
     def _updateModel(self, hwEvent: HardwareEvent) -> List[int] | None:
         """Update the internal model based on the changes detected
@@ -376,6 +376,7 @@ class Streamdeck:
         # When we see a KEY_UP or a KEY_UP_DOWN, we focus on the UP event,
         # which signifies a state change (button was pressed & released) 
 
+        LONG_PRESS_MS = 400
         stateChange = False
         if hwEvent.eventType <= 2: # KEY_UP, KEY_DOWN, or KEY_UP_DOWN
             for btn in hwEvent.detail:
@@ -388,9 +389,13 @@ class Streamdeck:
                     stateChange = True
                     if self._model[index].state == 0:
                         # pressLevel: 1=short, 2=long
-                        pressLevel = 1 if (btn.duration_ms if btn.duration_ms is not None else 0) < 1000 else 2
+                        pressLevel = 1 if (btn.duration_ms if btn.duration_ms is not None else 0) < LONG_PRESS_MS else 2
                         self._model[index].state = pressLevel
-                    else:
+                    elif self._model[index].state == 1:
+                        # pressLevel: 0=short, 2=long
+                        pressLevel = 0 if (btn.duration_ms if btn.duration_ms is not None else 0) < LONG_PRESS_MS else 2
+                        self._model[index].state = pressLevel
+                    elif self._model[index].state == 2:
                         self._model[index].state = 0
                     self._repaintButton(index, self._model[index].state)
             
@@ -483,8 +488,50 @@ class Streamdeck:
         return hwEvent
 
     def _repaintButton(self, index: int, state: int) -> None:
-        """Stub: repaint the button at the given index to reflect the given state.
-        """
-        pass
+        # Use the `index` and `state` to derive a filepath
+        if index == 0 and state == 1:
+            img = Path(f"/home/pi/streamdeck/assets/{index}{state}.jpg").read_bytes()
+            self.updateKeyImage(img, index)
+        else:
+            color = "#4499ff" if state == 1 else "#0000ff" if state == 2 else "#000000"
+            self.fillKeyWithColor(index, color)
 
+    def _write_image(self, img: bytes, cmd: int, index: int) -> None:
+
+        REPORT_SIZE = 1024
+        HEADER_SIZE = 8
+        body_size = REPORT_SIZE - HEADER_SIZE
+
+        def reports_needed(img: bytes) -> int:
+            size = len(img)
+            return int(size/body_size) + (1 if size % body_size > 0 else 0)
+        
+        n = reports_needed(img)
+        last = n-1
+        reports = []
+        for i in range(n):
+            header = bytearray(HEADER_SIZE)
+            # Report type
+            header[0] = 0x02
+            # Command
+            header[1] = cmd
+            # Index, used for key and background images
+            header[2] = index
+            # Last report flag
+            header[3] = 0x01 if i == last else 0x00
+            # Content length
+            # header[4:6] = (body_size if i < last else (((i+1)*body_size) - len(img))).to_bytes(2, byteorder="little")
+            header[4:6] = (min(body_size, len(img) - (i * body_size))).to_bytes(2, byteorder="little")
+            # Report index
+            header[6:8] = i.to_bytes(2, byteorder="little")
+            header = bytes(header)
+            
+            # Capture a slice of the image as the body of the report.
+            body = img[(i*body_size):((i+1)*body_size)]
+            padding = bytes(REPORT_SIZE - len(header) - len(body))
+            report = header + body + padding
+
+            log.debug(f"Report {i}: {report.hex()}")
+            self._device.write(report)
+        
 __all__ = ["Streamdeck"]
